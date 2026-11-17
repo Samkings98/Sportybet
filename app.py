@@ -1,11 +1,12 @@
-
 # sportybet_bot.py - V13.4 COMPLETE - STRICT - PASTE WHOLE FILE
 # Lagos time | Last 2 in 30 days, STRICT 2 games or SKIP | No weak picks | BOOK NOW + WEEKEND
-# python sportybet_bot.py --pick
-import sys, json, time, requests, re, math, os, random
+# WEB VERSION - Flask wrapper added for Render. Bot logic unchanged.
+# python app.py --pick  (local)  |  gunicorn app:app (Render)
+import sys, json, time, requests, re, math, os, random, threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import concurrent.futures
+from flask import Flask, jsonify, render_template_string
 
 LAGOS = ZoneInfo("Africa/Lagos")
 UTC = ZoneInfo("UTC")
@@ -20,6 +21,11 @@ SPORTYBET_NG = "https://www.sportybet.com/ng/"
 CACHE_FILE = "last2_cache.json"
 LAST2_MAP = {}
 FAIL = {"skip": {}}
+
+# --- WEB STATE ---
+app = Flask(__name__)
+STATE = {"running": False, "last_run": None, "error": None, "tickets": None}
+STATE_LOCK = threading.Lock()
 
 def log_skip(r): FAIL["skip"][r] = FAIL["skip"].get(r, 0) + 1
 def clean(s):
@@ -99,7 +105,6 @@ def build_last2(sport, league, days=HISTORY_DAYS):
     for k in list(LAST2_MAP):
         if k.startswith(prefix): LAST2_MAP[k] = sorted(LAST2_MAP[k], reverse=True)[:2]
 
-# STRICT: Must have 2 REAL games. No 1-game duplicate. No cross-league name fallback.
 def get_last2(sport, league, tid):
     lst = LAST2_MAP.get(f"{sport}-{league}-{tid}", [])
     if len(lst) < 2:
@@ -134,7 +139,6 @@ def fetch_next_7_days(sport, league):
             except: continue
     return out
 
-# STRICT: No relaxed param. Same thresholds for BOOK NOW and WEEKEND.
 def analyse_football(g, hs, aws):
     h_pow=hs["attack"]+hs["defence"]+hs["wins"]*1.5+max(0,hs["speed"])*0.5; a_pow=aws["attack"]+aws["defence"]+aws["wins"]*1.5+max(0,aws["speed"])*0.5
     gap=h_pow-a_pow; combined=round((hs["total"]+aws["total"])/2,2)
@@ -147,7 +151,6 @@ def analyse_football(g, hs, aws):
         return {**base, "market": line, "est_odd": odd, "reason": f"OVER {line} STRICT | Combined {combined}", "score": combined}
     if combined<=2.2 and hs["avg_scored"]<=1.3 and aws["avg_scored"]<=1.3:
         return {**base, "market": "Under 2.5", "est_odd": 1.80, "reason": f"UNDER 2.5 STRICT | Combined {combined}", "score": 3.0-combined}
-    # NO Over 1.5 filler - if it doesn't pass above, SKIP. Strict.
     log_skip("football_no_edge_strict"); return None
 
 def analyse_basketball(g, hs, aws):
@@ -160,7 +163,6 @@ def analyse_basketball(g, hs, aws):
     comfort=min(hs["total"], aws["total"]); line=float(int(comfort*2)/2)
     if expected>line+5: return {**base, "market": f"Over {line}", "est_odd": 1.85, "reason": f"OVER {line} STRICT | Expected {expected}", "score": expected, "lowest_line": line}
     if expected<line-5: return {**base, "market": f"Under {line}", "est_odd": 1.85, "reason": f"UNDER {line} STRICT | Expected {expected}", "score": 100-expected, "lowest_line": line}
-    # NO relaxed filler - SKIP if no strict edge
     log_skip("basket_no_edge_strict"); return None
 
 def build_ticket(candidates, max_games):
@@ -219,20 +221,70 @@ def run_picker():
             if g.get("days_from_now",99)<=2: b_now_cands.append(p)
             else: b_weekend_cands.append(p)
     b_now_ticket, b_now_total=build_ticket(b_now_cands, BASKETBALL_MAX); b_weekend_ticket, b_weekend_total=build_ticket(b_weekend_cands, BASKETBALL_MAX)
-    tickets={"football_book_now": f_now_ticket, "football_book_now_total": f_now_total, "football_weekend": f_weekend_ticket, "football_weekend_total": f_weekend_total, "basketball_book_now": b_now_ticket, "basketball_book_now_total": b_now_total, "basketball_weekend": b_weekend_ticket, "basketball_weekend_total": b_weekend_total, "generated_at_lagos": now.isoformat()}
+    tickets={"football_book_now": f_now_ticket, "football_book_now_total": f_now_total, "football_weekend": f_weekend_ticket, "football_weekend_total": f_weekend_total, "basketball_book_now": b_now_ticket, "basketball_book_now_total": b_now_total, "basketball_weekend": b_weekend_ticket, "basketball_weekend_total": b_weekend_total, "generated_at_lagos": now.isoformat(), "skips": FAIL["skip"]}
     with open("tickets.json","w",encoding="utf-8") as f: json.dump(tickets,f,indent=2,ensure_ascii=False)
-    print("\n"+"="*60)
-    print(f"FOOTBALL BOOK NOW STRICT: {len(f_now_ticket)} games | TOTAL ~{f_now_total} | Pool {len(f_now_cands)}")
-    if f_now_total < TARGET_TOTAL_ODD: print(f"  -> STRICT: BOOK NOW football cannot reach 8000 today with strict picks. Do NOT force it. Wait for WEEKEND.")
-    for i,g in enumerate(f_now_ticket,1): print(f"{i}. [{g.get('league_name')} {g['date']} {g.get('time','')} Lagos - BOOK NOW] {g['home']} vs {g['away']} - {g['market']} @ {g['est_odd']} | {g['reason']}")
-    print(f"\nFOOTBALL WEEKEND STRICT: {len(f_weekend_ticket)} games | TOTAL ~{f_weekend_total} | Pool {len(f_weekend_cands)}")
-    for i,g in enumerate(f_weekend_ticket,1): print(f"{i}. [{g.get('league_name')} {g['date']} {g.get('time','')} Lagos - WAIT] {g['home']} vs {g['away']} - {g['market']} @ {g['est_odd']} | {g['reason']}")
-    print(f"\nBASKETBALL BOOK NOW STRICT: {len(b_now_ticket)} games | TOTAL ~{b_now_total} | Pool {len(b_now_cands)}")
-    for i,g in enumerate(b_now_ticket,1): print(f"{i}. [{g.get('league_name')} {g['date']} {g.get('time','')} Lagos - BOOK NOW] {g['home']} vs {g['away']} - {g['market']} @ {g['est_odd']} | {g['reason']}")
-    print(f"\nBASKETBALL WEEKEND STRICT: {len(b_weekend_ticket)} games | TOTAL ~{b_weekend_total} | Pool {len(b_weekend_cands)}")
-    for i,g in enumerate(b_weekend_ticket,1): print(f"{i}. [{g.get('league_name')} {g['date']} {g.get('time','')} Lagos - WAIT] {g['home']} vs {g['away']} - {g['market']} @ {g['est_odd']} | {g['reason']}")
-    print(f"\nSKIPS (STRICT - this is good): {FAIL['skip']}")
-    print("STRICT RULE: Every pick above has 2 REAL games in last 30 days + passed strict gap. No weak fills.")
+    with STATE_LOCK: STATE["tickets"] = tickets
+    print(f"FOOTBALL BOOK NOW: {len(f_now_ticket)} | TOTAL {f_now_total}")
+    print(f"FOOTBALL WEEKEND: {len(f_weekend_ticket)} | TOTAL {f_weekend_total}")
+    print(f"BASKETBALL BOOK NOW: {len(b_now_ticket)} | TOTAL {b_now_total}")
+    print(f"BASKETBALL WEEKEND: {len(b_weekend_ticket)} | TOTAL {b_weekend_total}")
+    return tickets
+
+def _run_in_background():
+    with STATE_LOCK: STATE["running"] = True; STATE["error"] = None
+    try:
+        run_picker()
+        with STATE_LOCK: STATE["last_run"] = lagos_now().isoformat()
+    except Exception as e:
+        with STATE_LOCK: STATE["error"] = str(e)
+        print(f"PICKER ERROR: {e}")
+    finally:
+        with STATE_LOCK: STATE["running"] = False
+
+HTML = """
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SportyBot V14 - STRICT</title>
+<style>body{font-family:Arial,sans-serif;background:#0f1115;color:#fff;margin:0;padding:16px}h1{font-size:22px}button{background:#00c853;color:#fff;border:0;padding:14px 20px;font-size:18px;border-radius:10px;width:100%;cursor:pointer}button:disabled{opacity:.5}.card{background:#1c1f26;padding:14px;border-radius:12px;margin-top:14px}.game{border-bottom:1px solid #333;padding:8px 0}.tag{background:#ff9800;color:#000;padding:2px 8px;border-radius:20px;font-size:12px;font-weight:bold}.muted{color:#aaa}</style></head>
+<body><h1>⚽ SportyBot V14 - STRICT</h1><p class="muted">Last 2 in 30 days | STRICT 2 games or SKIP | Lagos time | Target 8000</p>
+<button id="runBtn" onclick="runPick()">▶ RUN PICK NOW</button><p id="status" class="muted">Press RUN PICK NOW. It takes 1-3 mins. Keep this page open.</p>
+<div id="out"></div>
+<script>
+async function runPick(){document.getElementById('runBtn').disabled=true;document.getElementById('status').innerText='Running... please wait 1-3 mins, do not close...';
+let r=await fetch('/run',{method:'POST'});let j=await r.json();
+let t=setInterval(async()=>{let s=await (await fetch('/status')).json();document.getElementById('status').innerText=s.running?'Still running...':'Done! '+ (s.last_run||'');
+if(!s.running){clearInterval(t);document.getElementById('runBtn').disabled=false;load();}},3000);}
+async function load(){let d=await (await fetch('/api/tickets')).json();let el=document.getElementById('out');if(!d||!d.tickets){el.innerHTML='<p>No picks yet.</p>';return;}
+let t=d.tickets;let html='';function sec(title,list,total){let h='<div class="card"><h3>'+title+' - '+list.length+' games | TOTAL ~'+total+'</h3>';if(!list.length)h+='<p>No strict picks. SKIP is good.</p>';list.forEach((g,i)=>{h+='<div class="game"><b>'+(i+1)+'. '+g.home+' vs '+g.away+'</b><br>'+g.league_name+' | '+g.date+' '+g.time+' Lagos <span class="tag">'+g.bookable+'</span><br>'+g.market+' @ '+g.est_odd+'<br><span class="muted">'+g.reason+'</span></div>'});h+='</div>';return h;}
+html+=sec('FOOTBALL BOOK NOW',t.football_book_now,t.football_book_now_total);html+=sec('FOOTBALL WEEKEND',t.football_weekend,t.football_weekend_total);html+=sec('BASKETBALL BOOK NOW',t.basketball_book_now,t.basketball_book_now_total);html+=sec('BASKETBALL WEEKEND',t.basketball_weekend,t.basketball_weekend_total);
+html+='<div class="card muted">Generated: '+t.generated_at_lagos+'</div>';el.innerHTML=html;}load();
+</script></body></html>
+"""
+
+@app.route("/")
+def home():
+    return render_template_string(HTML)
+
+@app.route("/status")
+def status():
+    with STATE_LOCK: return jsonify({"running": STATE["running"], "last_run": STATE["last_run"], "error": STATE["error"]})
+
+@app.route("/api/tickets")
+def api_tickets():
+    with STATE_LOCK:
+        if STATE["tickets"]: return jsonify({"tickets": STATE["tickets"]})
+    try:
+        with open("tickets.json", encoding="utf-8") as f: return jsonify({"tickets": json.load(f)})
+    except: return jsonify({"tickets": None})
+
+@app.route("/run", methods=["POST"])
+def run():
+    with STATE_LOCK:
+        if STATE["running"]: return jsonify({"ok": False, "msg": "Already running"})
+    th = threading.Thread(target=_run_in_background, daemon=True); th.start()
+    return jsonify({"ok": True, "msg": "Started"})
+
+@app.route("/health")
+def health(): return jsonify({"ok": True})
 
 def auto_book():
     from playwright.sync_api import sync_playwright
@@ -266,6 +318,9 @@ def auto_book():
         print("DONE"); input("Press ENTER to close..."); browser.close()
 
 if __name__=="__main__":
-    mode=sys.argv[1] if len(sys.argv)>1 else "--pick"
+    mode=sys.argv[1] if len(sys.argv)>1 else "--web"
     if mode=="--book-auto": auto_book()
-    else: run_picker()
+    elif mode=="--pick": run_picker()
+    else:
+        port = int(os.environ.get("PORT", 5000))
+        app.run(host="0.0.0.0", port=port)
