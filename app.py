@@ -1,4 +1,4 @@
-# sportybet_bot.py - V14.2 - STRICT + SAVE ON SERVER + BOOK ALL SAVED - PASTE WHOLE FILE
+# sportybet_bot.py - V14.3 - STRICT + TICK TO SAVE MULTIPLE TICKETS - PASTE WHOLE FILE
 import sys, json, time, requests, re, os, random, threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -12,7 +12,6 @@ FOOTBALL_MAX = 35
 BASKETBALL_MAX = 35
 DAYS_AHEAD = 7
 HISTORY_DAYS = 30
-SPORTYBET_NG = "https://www.sportybet.com/ng/"
 CACHE_FILE = "last2_cache.json"
 SAVED_FILE = "saved_weekend.json"
 LAST2_MAP = {}
@@ -223,39 +222,32 @@ def _run_in_background():
 HTML = """
 <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SportyBot V14 - STRICT</title>
-<style>body{font-family:Arial,sans-serif;background:#0f1115;color:#fff;margin:0;padding:16px}h1{font-size:22px}button{background:#00c853;color:#fff;border:0;padding:14px 20px;font-size:18px;border-radius:10px;width:100%;cursor:pointer;margin-top:10px}button:disabled{opacity:.5}.save{background:#ff9800;color:#000}.view{background:#2196f3}.bookall{background:#7c4dff}.card{background:#1c1f26;padding:14px;border-radius:12px;margin-top:14px}.game{border-bottom:1px solid #333;padding:8px 0}.tag{background:#ff9800;color:#000;padding:2px 8px;border-radius:20px;font-size:12px;font-weight:bold}.muted{color:#aaa}.book{display:block;background:#00c853;color:#fff;text-align:center;padding:12px;border-radius:8px;margin-top:8px;text-decoration:none;font-weight:bold}.savedbox{border:2px solid #ff9800;padding:10px;border-radius:10px}</style></head>
-<body><h1>⚽ SportyBot V14 - STRICT</h1><p class="muted">Last 2 in 30 days | STRICT 2 games or SKIP | Lagos time | Target 8000</p>
+<style>body{font-family:Arial,sans-serif;background:#0f1115;color:#fff;margin:0;padding:16px}h1{font-size:22px}button{background:#00c853;color:#fff;border:0;padding:14px 20px;font-size:18px;border-radius:10px;width:100%;cursor:pointer;margin-top:10px}button:disabled{opacity:.5}.save{background:#ff9800;color:#000}.saveall{background:#ff5722}.view{background:#2196f3}.bookall{background:#7c4dff}.card{background:#1c1f26;padding:14px;border-radius:12px;margin-top:14px}.game{border-bottom:1px solid #333;padding:8px 0}.tag{background:#ff9800;color:#000;padding:2px 8px;border-radius:20px;font-size:12px;font-weight:bold}.muted{color:#aaa}.book{display:block;background:#00c853;color:#fff;text-align:center;padding:12px;border-radius:8px;margin-top:8px;text-decoration:none;font-weight:bold}.tick{font-size:18px;background:#2a2e38;padding:10px;border-radius:8px;display:block;margin-bottom:8px}.tick input{width:22px;height:22px;transform:scale(1.4);margin-right:10px}.savedbox{border:2px solid #ff9800;padding:10px;border-radius:10px}.del{background:#e53935;padding:6px 12px;width:auto;font-size:14px}</style></head>
+<body><h1>⚽ SportyBot V14 - STRICT</h1><p class="muted">Tick the tickets you want to save. Each saved ticket stays separate.</p>
 <button id="runBtn" onclick="runPick()">▶ RUN PICK NOW</button>
-<button class="save" onclick="saveWeekend()">💾 SAVE WEEKEND TICKET - Keep this exact ticket</button>
-<button class="view" onclick="viewSaved()">📂 VIEW SAVED TICKET</button>
-<button class="bookall" onclick="bookAllSaved()">🎯 BOOK ALL SAVED WEEKEND - Open all games on SportyBet</button>
-<p id="status" class="muted">Weekend ticket WILL change if you re-run. SAVE it now, then book it later from SAVED.</p>
+<button class="save" onclick="saveTicked()">💾 SAVE TICKED TICKETS</button>
+<button class="saveall" onclick="saveAllWeekend()">💾 SAVE ALL WEEKEND TICKETS</button>
+<button class="view" onclick="viewSaved()">📂 VIEW SAVED TICKETS (<span id="savedCount">0</span>)</button>
+<button class="bookall" onclick="bookAllSaved()">🎯 BOOK ALL SAVED - Open all games on SportyBet</button>
+<p id="status" class="muted">Tip: Tick Football Weekend + Basketball Weekend, then SAVE TICKED.</p>
 <div id="out"></div>
 <script>
-let CURRENT=null; let SAVED=null;
-async function runPick(){document.getElementById('runBtn').disabled=true;document.getElementById('status').innerText='Running... please wait 1-3 mins, do not close...';
-let r=await fetch('/run',{method:'POST'});
-let t=setInterval(async()=>{let s=await (await fetch('/status')).json();document.getElementById('status').innerText=s.running?'Still running...':'Done! '+ (s.last_run||'');
-if(!s.running){clearInterval(t);document.getElementById('runBtn').disabled=false;load();}},3000);}
+let CURRENT=null; let SAVED_LIST=[];
 function bookLink(g){let q=encodeURIComponent(g.home+' vs '+g.away);return '<a class="book" href="https://www.sportybet.com/ng/search?query='+q+'" target="_blank">➡️ BOOK THIS GAME ON SPORTYBET</a>';}
-function render(t, titlePrefix, isSaved){let html='';function sec(title,list,total){let h='<div class="card"><h3>'+title+' - '+list.length+' games | TOTAL ~'+total+'</h3>';if(!list.length)h+='<p>No strict picks. SKIP is good.</p>';list.forEach((g,i)=>{h+='<div class="game"><b>'+(i+1)+'. '+g.home+' vs '+g.away+'</b><br>'+g.league_name+' | '+g.date+' '+g.time+' Lagos <span class="tag">'+g.bookable+'</span><br>'+g.market+' @ '+g.est_odd+'<br><span class="muted">'+g.reason+'</span><br>'+bookLink(g)+'</div>'});h+='</div>';return h;}
-html+=sec(titlePrefix+' FOOTBALL BOOK NOW',t.football_book_now||[],t.football_book_now_total||0);html+=sec(titlePrefix+' FOOTBALL WEEKEND',t.football_weekend||[],t.football_weekend_total||0);html+=sec(titlePrefix+' BASKETBALL BOOK NOW',t.basketball_book_now||[],t.basketball_book_now_total||0);html+=sec(titlePrefix+' BASKETBALL WEEKEND',t.basketball_weekend||[],t.basketball_weekend_total||0);
-html+='<div class="card muted">Generated: '+t.generated_at_lagos+'</div>';return html;}
-async function load(){let d=await (await fetch('/api/tickets')).json();let el=document.getElementById('out');if(!d||!d.tickets){el.innerHTML='<p>No picks yet. Press RUN PICK NOW.</p>';return;}CURRENT=d.tickets;el.innerHTML=render(CURRENT,'',false);checkSavedBadge();}
-async function checkSavedBadge(){let s=await (await fetch('/saved')).json();if(s&&s.saved){SAVED=s.saved;document.getElementById('status').innerText='✅ You have a SAVED weekend ticket from '+s.saved.saved_at+' - Tap VIEW SAVED to book it.';}}
-async function saveWeekend(){if(!CURRENT){alert('Run pick first, then save.');return;}
-let saved={saved_at:new Date().toISOString(), football_weekend:CURRENT.football_weekend, football_weekend_total:CURRENT.football_weekend_total, basketball_weekend:CURRENT.basketball_weekend, basketball_weekend_total:CURRENT.basketball_weekend_total, generated_at_lagos:CURRENT.generated_at_lagos};
-let r=await fetch('/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(saved)});let j=await r.json();
-if(j.ok){SAVED=saved;localStorage.setItem('saved_weekend_ticket',JSON.stringify(saved));alert('✅ WEEKEND TICKET SAVED ON SERVER!\\nFootball Weekend: '+saved.football_weekend.length+' games TOTAL ~'+saved.football_weekend_total+'\\nIt will NOT change even if you re-run. Book it later from VIEW SAVED.');}
-else alert('Save failed, try again.');}
-async function viewSaved(){let s=await (await fetch('/saved')).json();if(!s||!s.saved){let ls=localStorage.getItem('saved_weekend_ticket');if(!ls){alert('No saved ticket yet. Run pick then tap SAVE WEEKEND TICKET.');return;}s={saved:JSON.parse(ls)};}
-SAVED=s.saved;let t=s.saved;let full={football_book_now:[],football_book_now_total:0,football_weekend:t.football_weekend,football_weekend_total:t.football_weekend_total,basketball_book_now:[],basketball_book_now_total:0,basketball_weekend:t.basketball_weekend,basketball_weekend_total:t.basketball_weekend_total,generated_at_lagos:t.generated_at_lagos+' (SAVED AT '+t.saved_at+' - WILL NOT CHANGE)'};
-document.getElementById('out').innerHTML='<div class="savedbox"><h2>📂 SAVED WEEKEND TICKET - This will NOT change</h2><p class="muted">This is your exact saved ticket. Tap BOOK on any game, or BOOK ALL below.</p><button class="bookall" onclick="bookAllSaved()">🎯 BOOK ALL SAVED WEEKEND NOW</button></div>'+render(full,'SAVED',true);}
-async function bookAllSaved(){if(!SAVED){let s=await (await fetch('/saved')).json();if(!s||!s.saved){alert('No saved ticket. Save weekend first.');return;}SAVED=s.saved;}
-let all=[...SAVED.football_weekend, ...SAVED.basketball_weekend];if(!all.length){alert('Saved ticket is empty.');return;}
-if(!confirm('Open '+all.length+' games on SportyBet one by one?\\nChrome may block popups - allow popups for this site, then tap again.\\n\\nYou will tap the odd for each game yourself.'))return;
-all.forEach((g,i)=>{setTimeout(()=>{let q=encodeURIComponent(g.home+' vs '+g.away);window.open('https://www.sportybet.com/ng/search?query='+q,'_blank');}, i*1200);});
-alert('Opening '+all.length+' games... Wait for tabs to open, log in to SportyBet website in Chrome if asked, then tap the odd for each game.');}
+function ticketDef(key,title,list,total,isWeekend){return {key:key,title:title,list:list,total:total,isWeekend:isWeekend};}
+function renderTickets(t, showTick, prefix){let defs=[ticketDef('football_book_now','FOOTBALL BOOK NOW',t.football_book_now||[],t.football_book_now_total||0,false),ticketDef('football_weekend','FOOTBALL WEEKEND',t.football_weekend||[],t.football_weekend_total||0,true),ticketDef('basketball_book_now','BASKETBALL BOOK NOW',t.basketball_book_now||[],t.basketball_book_now_total||0,false),ticketDef('basketball_weekend','BASKETBALL WEEKEND',t.basketball_weekend||[],t.basketball_weekend_total||0,true)];let html='';defs.forEach(d=>{let h='<div class="card"><h3>'+prefix+d.title+' - '+d.list.length+' games | TOTAL ~'+d.total+'</h3>';if(showTick){let checked=d.isWeekend?'checked':'';h+='<label class="tick"><input type="checkbox" class="save-tick" data-key="'+d.key+'" '+checked+'> ✅ Tick to SAVE this ticket</label>';}if(!d.list.length)h+='<p>No strict picks.</p>';d.list.forEach((g,i)=>{h+='<div class="game"><b>'+(i+1)+'. '+g.home+' vs '+g.away+'</b><br>'+g.league_name+' | '+g.date+' '+g.time+' Lagos <span class="tag">'+g.bookable+'</span><br>'+g.market+' @ '+g.est_odd+'<br><span class="muted">'+g.reason+'</span><br>'+bookLink(g)+'</div>'});h+='</div>';html+=h;});html+='<div class="card muted">Generated: '+(t.generated_at_lagos||'')+'</div>';return html;}
+async function runPick(){document.getElementById('runBtn').disabled=true;document.getElementById('status').innerText='Running... please wait 1-3 mins...';await fetch('/run',{method:'POST'});let ti=setInterval(async()=>{let s=await (await fetch('/status')).json();document.getElementById('status').innerText=s.running?'Still running...':'Done! '+(s.last_run||'');if(!s.running){clearInterval(ti);document.getElementById('runBtn').disabled=false;load();}},3000);}
+async function load(){let d=await (await fetch('/api/tickets')).json();if(!d||!d.tickets){document.getElementById('out').innerHTML='<p>No picks yet.</p>';return;}CURRENT=d.tickets;document.getElementById('out').innerHTML=renderTickets(CURRENT,true,'');refreshSavedCount();}
+async function refreshSavedCount(){let s=await (await fetch('/saved')).json();SAVED_LIST=(s&&s.saved_list)?s.saved_list:[];document.getElementById('savedCount').innerText=SAVED_LIST.length;if(SAVED_LIST.length)document.getElementById('status').innerText='✅ You have '+SAVED_LIST.length+' saved ticket(s). Tap VIEW SAVED to book them.';}
+function getTickedKeys(){let out=[];document.querySelectorAll('.save-tick:checked').forEach(c=>out.push(c.dataset.key));return out;}
+async function doSave(keys){if(!CURRENT){alert('Run pick first.');return;}if(!keys.length){alert('Tick at least 1 ticket first.');return;}
+let ticketsToSave=keys.map(k=>{let map={football_book_now:['FOOTBALL BOOK NOW',CURRENT.football_book_now,CURRENT.football_book_now_total],football_weekend:['FOOTBALL WEEKEND',CURRENT.football_weekend,CURRENT.football_weekend_total],basketball_book_now:['BASKETBALL BOOK NOW',CURRENT.basketball_book_now,CURRENT.basketball_book_now_total],basketball_weekend:['BASKETBALL WEEKEND',CURRENT.basketball_weekend,CURRENT.basketball_weekend_total]};let v=map[k];return {key:k,title:v[0],games:v[1],total:v[2],generated_at_lagos:CURRENT.generated_at_lagos,saved_at:new Date().toISOString()};});
+let r=await fetch('/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tickets:ticketsToSave})});let j=await r.json();if(j.ok){alert('✅ SAVED '+ticketsToSave.length+' ticket(s)!\\n'+ticketsToSave.map(x=>x.title+' - '+x.games.length+' games TOTAL ~'+x.total).join('\\n')+'\\nThey will NOT change.');refreshSavedCount();}else alert('Save failed');}
+async function saveTicked(){await doSave(getTickedKeys());}
+async function saveAllWeekend(){await doSave(['football_weekend','basketball_weekend']);}
+async function viewSaved(){await refreshSavedCount();if(!SAVED_LIST.length){alert('No saved tickets yet. Tick tickets then SAVE.');return;}let html='<div class="savedbox"><h2>📂 SAVED TICKETS - '+SAVED_LIST.length+' ticket(s) - Will NOT change</h2><button class="bookall" onclick="bookAllSaved()">🎯 BOOK ALL SAVED NOW</button></div>';SAVED_LIST.forEach((t,idx)=>{html+='<div class="card"><h3>✅ SAVED: '+t.title+' - '+t.games.length+' games | TOTAL ~'+t.total+'</h3><p class="muted">Saved at: '+t.saved_at+' | Generated: '+t.generated_at_lagos+'</p><button class="del" onclick="deleteSaved('+idx+')">🗑 Delete this saved ticket</button>';t.games.forEach((g,i)=>{html+='<div class="game"><b>'+(i+1)+'. '+g.home+' vs '+g.away+'</b><br>'+g.league_name+' | '+g.date+' '+g.time+' Lagos <span class="tag">'+g.bookable+'</span><br>'+g.market+' @ '+g.est_odd+'<br><span class="muted">'+g.reason+'</span><br>'+bookLink(g)+'</div>'});html+='</div>';});document.getElementById('out').innerHTML=html;}
+async function deleteSaved(idx){if(!confirm('Delete this saved ticket?'))return;await fetch('/delete_saved/'+idx,{method:'POST'});viewSaved();}
+async function bookAllSaved(){await refreshSavedCount();if(!SAVED_LIST.length){alert('No saved tickets. Save first.');return;}let all=[];SAVED_LIST.forEach(t=>all.push(...t.games));if(!confirm('Open '+all.length+' games from '+SAVED_LIST.length+' saved ticket(s) on SportyBet?\\nAllow popups if Chrome blocks, then tap again.'))return;all.forEach((g,i)=>{setTimeout(()=>{let q=encodeURIComponent(g.home+' vs '+g.away);window.open('https://www.sportybet.com/ng/search?query='+q,'_blank');},i*1200);});alert('Opening '+all.length+' games... Log in to SportyBet website in Chrome if asked, then tap odd for each.');}
 load();
 </script></body></html>
 """
@@ -282,15 +274,45 @@ def run():
 def save_weekend():
     try:
         data = request.get_json(force=True)
-        data["saved_at"] = data.get("saved_at") or lagos_now().isoformat()
-        with open(SAVED_FILE,"w",encoding="utf-8") as f: json.dump(data,f,indent=2,ensure_ascii=False)
-        return jsonify({"ok": True})
+        new_tickets = data.get("tickets", [])
+        # Load existing saved list - do NOT overwrite, append
+        existing = []
+        if os.path.exists(SAVED_FILE):
+            try:
+                with open(SAVED_FILE, encoding="utf-8") as f:
+                    old = json.load(f)
+                    if isinstance(old, dict) and "saved_list" in old: existing = old["saved_list"]
+                    elif isinstance(old, list): existing = old
+                    elif isinstance(old, dict) and "tickets" in old: existing = old["tickets"]
+            except: existing = []
+        # Avoid exact duplicates: same title + same generated time + same games count
+        for nt in new_tickets:
+            dup = any(e.get("title")==nt.get("title") and e.get("generated_at_lagos")==nt.get("generated_at_lagos") and len(e.get("games",[]))==len(nt.get("games",[])) for e in existing)
+            if not dup: existing.append(nt)
+        with open(SAVED_FILE,"w",encoding="utf-8") as f: json.dump({"saved_list": existing},f,indent=2,ensure_ascii=False)
+        return jsonify({"ok": True, "count": len(existing)})
     except Exception as e: return jsonify({"ok": False, "error": str(e)})
 @app.route("/saved")
 def get_saved():
     try:
-        with open(SAVED_FILE, encoding="utf-8") as f: return jsonify({"saved": json.load(f)})
-    except: return jsonify({"saved": None})
+        with open(SAVED_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+            if isinstance(d, dict) and "saved_list" in d: return jsonify({"saved_list": d["saved_list"]})
+            if isinstance(d, list): return jsonify({"saved_list": d})
+            # Old single-ticket format - convert to list
+            if isinstance(d, dict) and "football_weekend" in d:
+                return jsonify({"saved_list": [{"title":"FOOTBALL WEEKEND (old save)","games":d.get("football_weekend",[]),"total":d.get("football_weekend_total",0),"generated_at_lagos":d.get("generated_at_lagos",""),"saved_at":d.get("saved_at","")}]})
+            return jsonify({"saved_list": []})
+    except: return jsonify({"saved_list": []})
+@app.route("/delete_saved/<int:idx>", methods=["POST"])
+def delete_saved(idx):
+    try:
+        with open(SAVED_FILE, encoding="utf-8") as f: d=json.load(f)
+        lst = d.get("saved_list",[]) if isinstance(d,dict) else []
+        if 0 <= idx < len(lst): lst.pop(idx)
+        with open(SAVED_FILE,"w",encoding="utf-8") as f: json.dump({"saved_list": lst},f,indent=2,ensure_ascii=False)
+        return jsonify({"ok": True})
+    except Exception as e: return jsonify({"ok": False, "error": str(e)})
 @app.route("/health")
 def health(): return jsonify({"ok": True})
 if __name__=="__main__":
