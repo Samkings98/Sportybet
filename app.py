@@ -1,6 +1,5 @@
-
-# sportybet_bot.py - V15.1 - FULL CODE - LAST 3 + H2H + SOS + LOGIN FIX - PASTE WHOLE FILE
-import sys, json, time, requests, re, os, random, threading
+# sportybet_bot.py - V16.2 - FULL CODE - ALL BASKETBALL LEAGUES FROM SPORTYBET - LAST 14 in 80 DAYS - PASTE WHOLE FILE
+import sys, json, time, requests, re, os, random, threading, math
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import concurrent.futures
@@ -12,11 +11,12 @@ TARGET_TOTAL_ODD = 8000
 FOOTBALL_MAX = 35
 BASKETBALL_MAX = 35
 DAYS_AHEAD = 7
-HISTORY_DAYS = 40
-NEED_GAMES = 3
-CACHE_FILE = "last3_cache.json"
+HISTORY_DAYS = 80
+NEED_GAMES = 14
+MIN_GAMES = 8
+CACHE_FILE = "last14_cache.json"
 SAVED_FILE = "saved_weekend.json"
-LAST3_MAP = {}
+LAST14_MAP = {}
 H2H_MAP = {}
 FAIL = {"skip": {}}
 
@@ -51,6 +51,7 @@ def parse_espn_time(date_str):
         return dt_utc.astimezone(LAGOS)
     except: return None
 
+# === FOOTBALL - UNTOUCHED, YOUR SAME 23 LEAGUES ===
 FOOTBALL_LEAGUES = [
     ("soccer", "eng.1", "Premier League"),("soccer", "esp.1", "LaLiga"),("soccer", "ita.1", "Serie A"),
     ("soccer", "ger.1", "Bundesliga"),("soccer", "fra.1", "Ligue 1"),("soccer", "ned.1", "Eredivisie"),
@@ -62,7 +63,34 @@ FOOTBALL_LEAGUES = [
     ("soccer", "fifa.friendly", "Int. Friendly Games"),("soccer", "conmebol.libertadores", "CONMEBOL Libertadores"),
     ("soccer", "conmebol.sudamericana", "CONMEBOL Sudamericana"),
 ]
-BASKETBALL_LEAGUES = [("basketball", "nba", "NBA"),("basketball", "mens-college-basketball", "NCAA, Regular Season"),("basketball", "wnba", "WNBA")]
+
+# === BASKETBALL - EXPANDED TO ALL YOUR SPORTYBET LEAGUES ===
+# NOTE: ESPN free feed does not carry every SportyBet league.
+# If ESPN returns 404 for a league, espn_get() returns None and that league is skipped safely.
+# NBA / NCAA / Euroleague / WNBA will work best. Others are tried anyway.
+BASKETBALL_LEAGUES = [
+    ("basketball", "nba", "NBA"),
+    ("basketball", "nba-cup", "NBA Cup 2026"),  # Same NBA teams, cup games - if 404, skipped, NBA still covers it
+    ("basketball", "wnba", "WNBA"),
+    ("basketball", "mens-college-basketball", "NCAA, Regular Season"),
+    ("basketball", "euroleague", "Euroleague"),
+    ("basketball", "eurocup", "Eurocup"),
+    ("basketball", "fiba-champions-league", "FIBA Champions League"),
+    ("basketball", "lnbp", "LNBP"),  # Mexico
+    ("basketball", "turkish-super-league", "Super Lig 26/27"),  # Turkey BSL
+    ("basketball", "israeli-super-league", "Basketball League"),  # Israel
+    ("basketball", "french-lnb-elite", "LNB Elite 26/27"),  # France
+    ("basketball", "spanish-acb", "Liga ACB 26/27"),  # Spain
+    ("basketball", "italian-serie-a", "Serie A 26/27"),  # Italy Lega Basket
+    ("basketball", "german-bbl", "BBL 26/27"),  # Germany
+    ("basketball", "vtb-united-league", "United League"),  # VTB
+    ("basketball", "brazilian-nbb", "NBB"),  # Brazil
+    ("basketball", "argentinian-lnb", "LNB"),  # Argentina
+    ("basketball", "korean-kbl", "KBL"),  # Korea
+    ("basketball", "australian-nbl", "NBL"),  # Extra: often on SportyBet too
+    ("basketball", "chinese-cba", "CBA"),  # Extra: often on SportyBet too
+]
+
 USER_AGENTS = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36","Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"]
 def espn_get(url):
     for attempt in range(3):
@@ -81,19 +109,19 @@ def fetch_sb(sport, league, date_str=None):
     data = espn_get(url)
     return data.get("events", []) if data else []
 def load_cache():
-    global LAST3_MAP, H2H_MAP
+    global LAST14_MAP, H2H_MAP
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, encoding="utf-8") as f:
-                d=json.load(f); LAST3_MAP=d.get("last3",{}); H2H_MAP=d.get("h2h",{})
-        except: LAST3_MAP={}; H2H_MAP={}
+                d=json.load(f); LAST14_MAP=d.get("last14",d.get("last3",{})); H2H_MAP=d.get("h2h",{})
+        except: LAST14_MAP={}; H2H_MAP={}
 def save_cache():
     try:
-        with open(CACHE_FILE, "w", encoding="utf-8") as f: json.dump({"last3":LAST3_MAP,"h2h":H2H_MAP}, f)
+        with open(CACHE_FILE, "w", encoding="utf-8") as f: json.dump({"last14":LAST14_MAP,"h2h":H2H_MAP}, f)
     except: pass
-def build_last3(sport, league, days=HISTORY_DAYS):
+def build_last14(sport, league, days=HISTORY_DAYS):
     prefix = f"{sport}-{league}-"
-    if any(k.startswith(prefix) for k in LAST3_MAP): return
+    if any(k.startswith(prefix) for k in LAST14_MAP): return
     today = lagos_now()
     for d in range(1, days+1):
         dt = today - timedelta(days=d); ds = dt.strftime("%Y%m%d")
@@ -113,40 +141,73 @@ def build_last3(sport, league, days=HISTORY_DAYS):
                 if entry not in H2H_MAP[hkey]: H2H_MAP[hkey].append(entry)
                 for mine, opp, my, op in [(t0, t1, s0, s1), (t1, t0, s1, s0)]:
                     k = f"{sport}-{league}-{mine['team']['id']}"
-                    LAST3_MAP.setdefault(k, []); e = [ds, my, op, str(opp["team"]["displayName"]), str(opp["team"]["id"])]
-                    if e not in LAST3_MAP[k]: LAST3_MAP[k].append(e)
+                    LAST14_MAP.setdefault(k, [])
+                    is_home = 1 if mine.get("homeAway")=="home" else 0
+                    e = [ds, my, op, str(opp["team"]["displayName"]), str(opp["team"]["id"]), is_home]
+                    if e not in LAST14_MAP[k]: LAST14_MAP[k].append(e)
             except: continue
-    for k in list(LAST3_MAP):
-        if k.startswith(prefix): LAST3_MAP[k] = sorted(LAST3_MAP[k], reverse=True)[:NEED_GAMES]
+    for k in list(LAST14_MAP):
+        if k.startswith(prefix): LAST14_MAP[k] = sorted(LAST14_MAP[k], reverse=True)[:NEED_GAMES]
     for k in list(H2H_MAP):
         H2H_MAP[k] = sorted(H2H_MAP[k], reverse=True)[:5]
-def get_last3(sport, league, tid):
-    lst = LAST3_MAP.get(f"{sport}-{league}-{tid}", [])
-    if len(lst) < NEED_GAMES:
-        log_skip("last3_lt3_strict_skip"); return None
+def weighted_avg(values, decay=0.92):
+    if not values: return 0
+    weights = [decay**i for i in range(len(values))]
+    return sum(v*w for v,w in zip(values, weights)) / sum(weights)
+def get_last14(sport, league, tid, next_game_date=None):
+    lst = LAST14_MAP.get(f"{sport}-{league}-{tid}", [])
+    if len(lst) < MIN_GAMES:
+        log_skip("last14_lt8_skip"); return None
     scored = [x[1] for x in lst]; conceded = [x[2] for x in lst]
+    w_scored = weighted_avg(scored); w_conceded = weighted_avg(conceded); w_total = w_scored + w_conceded
     avg_s = sum(scored)/len(scored); avg_c = sum(conceded)/len(conceded)
     wins = sum(1 for my, op in zip(scored, conceded) if my > op)
     draws = sum(1 for my, op in zip(scored, conceded) if my == op)
     losses = sum(1 for my, op in zip(scored, conceded) if my < op)
-    speed = scored[0]-scored[-1]
-    if sport == "soccer": attack = round(avg_s*2, 1); defence = round(max(0, 5-avg_c), 1)
-    else: attack = round(avg_s/10, 1); defence = round(max(0, 10-avg_c/10), 1)
+    home_games = [x for x in lst if x[5]==1]; away_games = [x for x in lst if x[5]==0]
+    def _avg(arr, idx): return round(sum(x[idx] for x in arr)/len(arr),2) if arr else avg_s if idx==1 else avg_c
+    h_scored = _avg(home_games,1); h_conceded = _avg(home_games,2); a_scored = _avg(away_games,1); a_conceded = _avg(away_games,2)
+    def _std(vals, mean):
+        if len(vals)<2: return 0
+        return (sum((v-mean)**2 for v in vals)/len(vals))**0.5
+    std_scored = _std(scored, avg_s); std_total = _std([a+b for a,b in zip(scored, conceded)], avg_s+avg_c)
+    pace = round(w_total,2); speed = round(weighted_avg(scored[:3]) - weighted_avg(scored[-3:]),2) if len(scored)>=6 else 0
+    # CORRECTED REST: last game -> NEXT game, not today -> last game. Only true B2B punished.
+    try:
+        last_date = datetime.strptime(lst[0][0], "%Y%m%d").date()
+        rest_to_next = (next_game_date - last_date).days if next_game_date else 3
+    except: rest_to_next = 3
+    rest_days = rest_to_next; fatigue = 0
+    if sport != "soccer":
+        # ALL basketball leagues: NBA, NCAA, WNBA, Euroleague, Eurocup, etc. same rule
+        if rest_to_next <= 1: fatigue = -4.0
+        elif rest_to_next == 2: fatigue = -0.5
+        else: fatigue = 0.0
+        if len(lst) >= 3:
+            try:
+                d0 = datetime.strptime(lst[0][0], "%Y%m%d").date(); d2 = datetime.strptime(lst[2][0], "%Y%m%d").date()
+                if (d0 - d2).days <= 4: fatigue += -1.5
+            except: pass
+    else:
+        fatigue = -0.4 if rest_to_next <= 2 else 0.0
+    if sport == "soccer": attack = round(w_scored*2, 1); defence = round(max(0, 5-w_conceded), 1)
+    else: attack = round(w_scored/10, 1); defence = round(max(0, 10-w_conceded/10), 1)
     sos_points = 0
     for my, op in zip(scored, conceded):
         if sport == "soccer": opp_strength = 1.0 + (op - 1.2)*0.2
         else: opp_strength = 1.0 + (op - 100)*0.01
-        opp_strength = max(0.5, min(1.5, opp_strength))
-        if my > op: pts = 3
-        elif my == op: pts = 1
-        else: pts = 0
-        sos_points += pts * opp_strength
-    sos_points = round(sos_points,2)
-    motivation = 0.5 if wins==0 else 0.0
-    return {"games": NEED_GAMES, "scored": scored, "conceded": conceded, "avg_scored": round(avg_s,2), "avg_conceded": round(avg_c,2), "total": round(avg_s+avg_c,1), "wins": wins, "draws": draws, "losses": losses, "speed": speed, "attack": attack, "defence": defence, "sos_points": sos_points, "motivation": motivation, "opponents": [x[3] for x in lst]}
+        opp_strength = max(0.5, min(1.5, opp_strength)); pts = 3 if my>op else 1 if my==op else 0; sos_points += pts * opp_strength
+    sos_points = round(sos_points/len(lst)*3,2); motivation = 0.5 if wins==0 else 0.0
+    consistency = max(0.3, 1 - (std_total / (avg_s+avg_c+1) * 1.5)) if avg_s+avg_c>0 else 0.5
+    confidence = round(consistency * min(1.0, len(lst)/NEED_GAMES),2)
+    return {"games": len(lst), "scored": scored, "conceded": conceded, "avg_scored": round(avg_s,2), "avg_conceded": round(avg_c,2),
+            "w_scored": round(w_scored,2), "w_conceded": round(w_conceded,2), "total": round(avg_s+avg_c,1), "w_total": round(w_total,1), "pace": pace,
+            "wins": wins, "draws": draws, "losses": losses, "speed": speed, "attack": attack, "defence": defence, "sos_points": sos_points,
+            "motivation": motivation, "opponents": [x[3] for x in lst], "home_scored": h_scored, "home_conceded": h_conceded,
+            "away_scored": a_scored, "away_conceded": a_conceded, "std_scored": round(std_scored,2), "std_total": round(std_total,2),
+            "confidence": confidence, "rest_days": rest_days, "fatigue": fatigue}
 def get_h2h(id_home, id_away):
-    hkey = "-".join(sorted([str(id_home), str(id_away)]))
-    lst = H2H_MAP.get(hkey, [])
+    hkey = "-".join(sorted([str(id_home), str(id_away)])); lst = H2H_MAP.get(hkey, [])
     if not lst: return {"games":0, "home_wins":0, "away_wins":0, "draws":0, "bonus_home":0, "bonus_away":0, "text":"No recent H2H"}
     hw=aw=dr=0
     for ds, s0, s1, id0, id1, n0, n1 in lst:
@@ -155,9 +216,7 @@ def get_h2h(id_home, id_away):
         if hs>aws: hw+=1
         elif aws>hs: aw+=1
         else: dr+=1
-    bonus_home = 0.8 if hw>aw else 0
-    bonus_away = 0.8 if aw>hw else 0
-    return {"games":len(lst), "home_wins":hw, "away_wins":aw, "draws":dr, "bonus_home":bonus_home, "bonus_away":bonus_away, "text": f"H2H last {len(lst)}: Home {hw}W - {dr}D - {aw}W Away"}
+    return {"games":len(lst), "home_wins":hw, "away_wins":aw, "draws":dr, "bonus_home": 0.8 if hw>aw else 0, "bonus_away": 0.8 if aw>hw else 0, "text": f"H2H last {len(lst)}: Home {hw}W - {dr}D - {aw}W Away"}
 def fetch_next_7_days(sport, league):
     out=[]; now_lagos=lagos_now(); today=now_lagos
     for offset in range(DAYS_AHEAD):
@@ -173,43 +232,48 @@ def fetch_next_7_days(sport, league):
                 kickoff_lagos=parse_espn_time(ev.get("date",""))
                 if kickoff_lagos is None: kickoff_lagos=dt_day.replace(hour=12,minute=0)
                 if kickoff_lagos < now_lagos: continue
-                date_label=kickoff_lagos.strftime("%Y-%m-%d"); time_label=kickoff_lagos.strftime("%H:%M")
-                days_from_now=(kickoff_lagos.date()-now_lagos.date()).days
+                date_label=kickoff_lagos.strftime("%Y-%m-%d"); time_label=kickoff_lagos.strftime("%H:%M"); days_from_now=(kickoff_lagos.date()-now_lagos.date()).days
                 bookable="BOOK NOW" if days_from_now<=2 else "WAIT - WEEKEND"
                 out.append({"home": h["team"]["displayName"], "away": a["team"]["displayName"], "home_sporty": sporty_name(h["team"]["displayName"]), "away_sporty": sporty_name(a["team"]["displayName"]), "home_id": str(h["team"]["id"]), "away_id": str(a["team"]["id"]), "league": league, "sport": sport, "date": date_label, "time": time_label, "days_from_now": days_from_now, "bookable": bookable})
             except: continue
     return out
+def prob_from_gap(gap, scale=2.5):
+    try: return 1/(1+math.exp(-gap/scale))
+    except: return 0.5
 def analyse_football(g, hs, aws):
-    HOME_ADV = 1.0
-    h2h = get_h2h(g["home_id"], g["away_id"])
-    h_pow = hs["attack"]+hs["defence"]+hs["wins"]*1.2+hs["sos_points"]*0.4+max(0,hs["speed"])*0.4+hs["motivation"]+h2h["bonus_home"]+HOME_ADV
-    a_pow = aws["attack"]+aws["defence"]+aws["wins"]*1.2+aws["sos_points"]*0.4+max(0,aws["speed"])*0.4+aws["motivation"]+h2h["bonus_away"]
-    gap=h_pow-a_pow; combined=round((hs["total"]+aws["total"])/2,2)
+    HOME_ADV = 1.0; h2h = get_h2h(g["home_id"], g["away_id"])
+    h_attack = hs["home_scored"]*2 if hs["home_scored"] else hs["attack"]; a_attack = aws["away_scored"]*2 if aws["away_scored"] else aws["attack"]
+    h_pow = h_attack + hs["defence"] + hs["wins"]*0.6 + hs["sos_points"]*0.4 + max(0,hs["speed"])*0.4 + hs["motivation"] + h2h["bonus_home"] + HOME_ADV + hs["fatigue"]
+    a_pow = a_attack + aws["defence"] + aws["wins"]*0.6 + aws["sos_points"]*0.4 + max(0,aws["speed"])*0.4 + aws["motivation"] + h2h["bonus_away"] + aws["fatigue"]
+    gap = h_pow - a_pow; combined = round((hs["w_total"]+aws["w_total"])/2,2); conf = min(hs["confidence"], aws["confidence"])
     base={"home": g["home"], "away": g["away"], "home_sporty": g.get("home_sporty", g["home"]), "away_sporty": g.get("away_sporty", g["away"]), "league": g["league"], "date": g["date"], "time": g.get("time",""), "days_from_now": g.get("days_from_now",0), "bookable": g.get("bookable","")}
-    detail = f"H2H: {h2h['text']} | SOS Home {hs['sos_points']} vs Away {aws['sos_points']} | Home Adv +1.0 | Injuries: Not available on free feed"
-    if abs(gap) >= 2.2:
-        if gap>0: return {**base, "market": "1 - Home Win", "est_odd": round(1.85+min(0.9,abs(gap)*0.08),2), "reason": f"HOME | H {hs['scored']} vs A {aws['scored']} Gap {round(gap,1)} | {detail}", "score": abs(gap)}
-        else: return {**base, "market": "2 - Away Win", "est_odd": round(1.95+min(0.9,abs(gap)*0.08),2), "reason": f"AWAY | A {aws['scored']} vs H {hs['scored']} Gap {round(gap,1)} | {detail}", "score": abs(gap)}
-    if combined>=2.6 and hs["avg_scored"]>=1.2 and aws["avg_scored"]>=1.2:
+    detail = f"H2H: {h2h['text']} | SOS H {hs['sos_points']} vs A {aws['sos_points']} | Home Adv +1.0 | Conf {conf} | Pace {combined} | Rest H{hs['rest_days']}d A{aws['rest_days']}d | Injuries: Not on free feed"
+    if abs(gap) >= 2.2 and conf >= 0.45:
+        prob = prob_from_gap(gap, scale=2.2)
+        if gap>0 and prob >= 0.55: return {**base, "market": "1 - Home Win", "est_odd": round(1/max(0.15, prob),2), "reason": f"HOME | Gap {round(gap,1)} Prob {round(prob*100)}% | {detail}", "score": abs(gap)*conf}
+        if gap<0 and (1-prob) >= 0.55: return {**base, "market": "2 - Away Win", "est_odd": round(1/max(0.15, 1-prob),2), "reason": f"AWAY | Gap {round(gap,1)} Prob {round((1-prob)*100)}% | {detail}", "score": abs(gap)*conf}
+    if combined>=2.6 and hs["w_scored"]>=1.2 and aws["w_scored"]>=1.2 and conf>=0.45:
         line="Over 3.5" if combined>=3.8 else "Over 2.5"; odd=2.10 if line=="Over 3.5" else 1.75
-        return {**base, "market": line, "est_odd": odd, "reason": f"OVER {line} | Combined {combined} | {detail}", "score": combined}
-    if combined<=2.2 and hs["avg_scored"]<=1.3 and aws["avg_scored"]<=1.3:
-        return {**base, "market": "Under 2.5", "est_odd": 1.80, "reason": f"UNDER 2.5 | Combined {combined} | {detail}", "score": 3.0-combined}
+        return {**base, "market": line, "est_odd": odd, "reason": f"OVER {line} | Exp Total {combined} | {detail}", "score": combined*conf}
+    if combined<=2.2 and hs["w_scored"]<=1.3 and aws["w_scored"]<=1.3 and conf>=0.45:
+        return {**base, "market": "Under 2.5", "est_odd": 1.80, "reason": f"UNDER 2.5 | Exp Total {combined} | {detail}", "score": (3.0-combined)*conf}
     log_skip("football_no_edge_strict"); return None
 def analyse_basketball(g, hs, aws):
-    HOME_ADV = 5.0
-    h2h = get_h2h(g["home_id"], g["away_id"])
-    h_pow=hs["avg_scored"]-hs["avg_conceded"]+hs["wins"]*5+hs["speed"]+hs["sos_points"]+hs["motivation"]+HOME_ADV+h2h["bonus_home"]*2
-    a_pow=aws["avg_scored"]-aws["avg_conceded"]+aws["wins"]*5+aws["speed"]+aws["sos_points"]+aws["motivation"]+h2h["bonus_away"]*2
-    gap=h_pow-a_pow; expected=round((hs["total"]+aws["total"])/2,1)
+    HOME_ADV = 5.0; h2h = get_h2h(g["home_id"], g["away_id"])
+    h_diff = hs["home_scored"]-hs["home_conceded"] if hs["home_scored"] else hs["w_scored"]-hs["w_conceded"]
+    a_diff = aws["away_scored"]-aws["away_conceded"] if aws["away_scored"] else aws["w_scored"]-aws["w_conceded"]
+    h_pow = h_diff + hs["wins"]*2.5 + hs["speed"] + hs["sos_points"] + hs["motivation"] + HOME_ADV + h2h["bonus_home"]*2 + hs["fatigue"]
+    a_pow = a_diff + aws["wins"]*2.5 + aws["speed"] + aws["sos_points"] + aws["motivation"] + h2h["bonus_away"]*2 + aws["fatigue"]
+    gap = h_pow - a_pow; expected = round((hs["w_total"]+aws["w_total"])/2,1); pace_total = round((hs["pace"]+aws["pace"])/2,1); expected = round((expected+pace_total)/2,1); conf = min(hs["confidence"], aws["confidence"])
     base={"home": g["home"], "away": g["away"], "home_sporty": g.get("home_sporty", g["home"]), "away_sporty": g.get("away_sporty", g["away"]), "league": g["league"], "date": g["date"], "time": g.get("time",""), "days_from_now": g.get("days_from_now",0), "bookable": g.get("bookable","")}
-    detail = f"H2H: {h2h['text']} | SOS H {hs['sos_points']} vs A {aws['sos_points']} | Home Adv +5"
-    if abs(gap) >= 9:
-        if gap>0: return {**base, "market": "1 - Home Win", "est_odd": 1.85, "reason": f"HOME WIN | H {hs['scored']} vs A {aws['scored']} Gap {round(gap,1)} | {detail}", "score": abs(gap)}
-        else: return {**base, "market": "2 - Away Win", "est_odd": 1.95, "reason": f"AWAY WIN | A {aws['scored']} vs H {hs['scored']} Gap {round(gap,1)} | {detail}", "score": abs(gap)}
-    comfort=min(hs["total"], aws["total"]); line=float(int(comfort*2)/2)
-    if expected>line+5: return {**base, "market": f"Over {line}", "est_odd": 1.85, "reason": f"OVER {line} | Expected {expected} | {detail}", "score": expected, "lowest_line": line}
-    if expected<line-5: return {**base, "market": f"Under {line}", "est_odd": 1.85, "reason": f"UNDER {line} | Expected {expected} | {detail}", "score": 100-expected, "lowest_line": line}
+    detail = f"H2H: {h2h['text']} | SOS H {hs['sos_points']} vs A {aws['sos_points']} | Home Adv +5 | Conf {conf} | Pace {pace_total} | Rest H{hs['rest_days']}d A{aws['rest_days']}d"
+    if abs(gap) >= 9 and conf >= 0.45:
+        prob = prob_from_gap(gap, scale=7.0)
+        if gap>0 and prob>=0.58: return {**base, "market": "1 - Home Win", "est_odd": round(1/max(0.2,prob),2), "reason": f"HOME WIN | Gap {round(gap,1)} Prob {round(prob*100)}% | {detail}", "score": abs(gap)*conf}
+        if gap<0 and (1-prob)>=0.58: return {**base, "market": "2 - Away Win", "est_odd": round(1/max(0.2,1-prob),2), "reason": f"AWAY WIN | Gap {round(gap,1)} Prob {round((1-prob)*100)}% | {detail}", "score": abs(gap)*conf}
+    comfort=min(hs["w_total"], aws["w_total"]); line=float(int(comfort*2)/2)
+    if expected>line+6 and conf>=0.45: return {**base, "market": f"Over {line}", "est_odd": 1.85, "reason": f"OVER {line} | Expected {expected} Pace {pace_total} | {detail}", "score": expected*conf, "lowest_line": line}
+    if expected<line-6 and conf>=0.45: return {**base, "market": f"Under {line}", "est_odd": 1.85, "reason": f"UNDER {line} | Expected {expected} Pace {pace_total} | {detail}", "score": (100-expected)*conf, "lowest_line": line}
     log_skip("basket_no_edge_strict"); return None
 def build_ticket(candidates, max_games):
     candidates=sorted(candidates, key=lambda x: x["score"], reverse=True); picked=[]; total=1.0
@@ -218,9 +282,9 @@ def build_ticket(candidates, max_games):
         picked.append(c); total*=c["est_odd"]
         if total>=TARGET_TOTAL_ODD and len(picked)>=12: break
     return picked, round(total,1)
-def build_all_last3(leagues):
+def build_all_last14(leagues):
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
-        futs={ex.submit(build_last3, s, l, HISTORY_DAYS): (s,l,n) for s,l,n in leagues}
+        futs={ex.submit(build_last14, s, l, HISTORY_DAYS): (s,l,n) for s,l,n in leagues}
         for f in concurrent.futures.as_completed(futs):
             try: f.result()
             except: pass
@@ -243,10 +307,12 @@ def fetch_all_7days(leagues):
     return uniq
 def run_picker():
     now=lagos_now(); load_cache()
-    build_all_last3(FOOTBALL_LEAGUES); f_games=fetch_all_7days(FOOTBALL_LEAGUES)
+    build_all_last14(FOOTBALL_LEAGUES); f_games=fetch_all_7days(FOOTBALL_LEAGUES)
     f_now_cands=[]; f_weekend_cands=[]
     for g in f_games:
-        hs=get_last3(g["sport"], g["league"], g["home_id"]); aws=get_last3(g["sport"], g["league"], g["away_id"])
+        try: nxt = datetime.strptime(g["date"], "%Y-%m-%d").date()
+        except: nxt = None
+        hs=get_last14(g["sport"], g["league"], g["home_id"], next_game_date=nxt); aws=get_last14(g["sport"], g["league"], g["away_id"], next_game_date=nxt)
         if not hs or not aws: continue
         p=analyse_football(g, hs, aws)
         if p:
@@ -254,10 +320,12 @@ def run_picker():
             if g.get("days_from_now",99)<=2: f_now_cands.append(p)
             else: f_weekend_cands.append(p)
     f_now_ticket, f_now_total=build_ticket(f_now_cands, FOOTBALL_MAX); f_weekend_ticket, f_weekend_total=build_ticket(f_weekend_cands, FOOTBALL_MAX)
-    build_all_last3(BASKETBALL_LEAGUES); b_games=fetch_all_7days(BASKETBALL_LEAGUES)
+    build_all_last14(BASKETBALL_LEAGUES); b_games=fetch_all_7days(BASKETBALL_LEAGUES)
     b_now_cands=[]; b_weekend_cands=[]
     for g in b_games:
-        hs=get_last3(g["sport"], g["league"], g["home_id"]); aws=get_last3(g["sport"], g["league"], g["away_id"])
+        try: nxt = datetime.strptime(g["date"], "%Y-%m-%d").date()
+        except: nxt = None
+        hs=get_last14(g["sport"], g["league"], g["home_id"], next_game_date=nxt); aws=get_last14(g["sport"], g["league"], g["away_id"], next_game_date=nxt)
         if not hs or not aws: continue
         p=analyse_basketball(g, hs, aws)
         if p:
@@ -265,7 +333,7 @@ def run_picker():
             if g.get("days_from_now",99)<=2: b_now_cands.append(p)
             else: b_weekend_cands.append(p)
     b_now_ticket, b_now_total=build_ticket(b_now_cands, BASKETBALL_MAX); b_weekend_ticket, b_weekend_total=build_ticket(b_weekend_cands, BASKETBALL_MAX)
-    tickets={"football_book_now": f_now_ticket, "football_book_now_total": f_now_total, "football_weekend": f_weekend_ticket, "football_weekend_total": f_weekend_total, "basketball_book_now": b_now_ticket, "basketball_book_now_total": b_now_total, "basketball_weekend": b_weekend_ticket, "basketball_weekend_total": b_weekend_total, "generated_at_lagos": now.isoformat(), "skips": FAIL["skip"], "model": "V15.1 Last3-40days + H2H + SOS + HomeAdv + LoginFix"}
+    tickets={"football_book_now": f_now_ticket, "football_book_now_total": f_now_total, "football_weekend": f_weekend_ticket, "football_weekend_total": f_weekend_total, "basketball_book_now": b_now_ticket, "basketball_book_now_total": b_now_total, "basketball_weekend": b_weekend_ticket, "basketball_weekend_total": b_weekend_total, "generated_at_lagos": now.isoformat(), "skips": FAIL["skip"], "model": "V16.2 AllBasketballLeagues + Last14-80days + CorrectedRest"}
     with open("tickets.json","w",encoding="utf-8") as f: json.dump(tickets,f,indent=2,ensure_ascii=False)
     with STATE_LOCK: STATE["tickets"] = tickets
     return tickets
@@ -278,45 +346,36 @@ def _run_in_background():
         with STATE_LOCK: STATE["error"] = str(e)
     finally:
         with STATE_LOCK: STATE["running"] = False
-
 HTML = """
 <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SportyBot V15.1</title>
+<title>SportyBot V16.2</title>
 <style>body{font-family:Arial,sans-serif;background:#0f1115;color:#fff;margin:0;padding:16px}h1{font-size:22px}button{background:#00c853;color:#fff;border:0;padding:14px 20px;font-size:18px;border-radius:10px;width:100%;cursor:pointer;margin-top:10px}button:disabled{opacity:.5}.save{background:#ff9800;color:#000}.saveall{background:#ff5722}.view{background:#2196f3}.bookall{background:#7c4dff}.card{background:#1c1f26;padding:14px;border-radius:12px;margin-top:14px}.game{border-bottom:1px solid #333;padding:8px 0}.tag{background:#ff9800;color:#000;padding:2px 8px;border-radius:20px;font-size:12px;font-weight:bold}.muted{color:#aaa}.book{display:block;background:#00c853;color:#fff;text-align:center;padding:12px;border-radius:8px;margin-top:8px;text-decoration:none;font-weight:bold}.copy{display:block;background:#333;color:#fff;text-align:center;padding:8px;border-radius:8px;margin-top:6px;text-decoration:none}.tick{font-size:18px;background:#2a2e38;padding:10px;border-radius:8px;display:block;margin-bottom:8px}.tick input{width:22px;height:22px;transform:scale(1.4);margin-right:10px}.savedbox{border:2px solid #ff9800;padding:10px;border-radius:10px}.del{background:#e53935;padding:6px 12px;width:auto;font-size:14px}.loginbtn{display:block;background:#fff;color:#000;text-align:center;padding:14px;border-radius:10px;margin-top:10px;text-decoration:none;font-weight:bold;font-size:18px}.waitbox{background:#333;padding:10px;border-radius:8px;margin-top:8px}</style></head>
-<body><h1>⚽ SportyBot V15.1 - Last 3 + H2H + SOS</h1><p class="muted">Last 3 in 40 days | H2H + Home Advantage + SOS (Draw vs strong = good) | Injuries/Lineup: Not on free feed, bot will not guess.</p>
-<a class="loginbtn" href="https://www.sportybet.com/ng/" target="_blank">🔐 LOGIN TO SPORTYBET FIRST - Tap here, login, then come back to book</a>
-<p class="muted">If you are not logged in, SportyBet will clear the search and you will have to type yourself. Login first = auto-search works.</p>
+<body><h1>⚽ SportyBot V16.2 - All Basketball Leagues</h1><p class="muted">Last 14 in 80 days | All Basketball: NBA + NBA Cup + WNBA + NCAA + Euroleague + Eurocup + FIBA CL + LNBP + Super Lig + Israel + LNB Elite + ACB + Serie A + BBL + United + NBB + LNB + KBL | Football: 23 leagues unchanged</p>
+<a class="loginbtn" href="https://www.sportybet.com/ng/" target="_blank">🔐 LOGIN TO SPORTYBET FIRST</a>
 <button id="runBtn" onclick="runPick()">▶ RUN PICK NOW</button>
 <button class="save" onclick="saveTicked()">💾 SAVE TICKED TICKETS</button>
 <button class="saveall" onclick="saveAllWeekend()">💾 SAVE ALL WEEKEND TICKETS</button>
 <button class="view" onclick="viewSaved()">📂 VIEW SAVED TICKETS (<span id="savedCount">0</span>)</button>
-<button class="bookall" onclick="bookAllSaved()">🎯 BOOK ALL SAVED - Open all games on SportyBet</button>
-<p id="status" class="muted">Tip: Login to SportyBet first, then tap BOOK. Games on 19th are not on SportyBet yet - they appear 1-2 days before.</p>
+<button class="bookall" onclick="bookAllSaved()">🎯 BOOK ALL SAVED</button>
+<p id="status" class="muted">Tip: Login to SportyBet first, then tap BOOK.</p>
 <div id="out"></div>
 <script>
 let CURRENT=null; let SAVED_LIST=[];
 function shortSearchName(g){
   let home = g.home_sporty || g.home;
-  // Basketball: "Los Angeles Lakers" -> "Lakers", "Boston Celtics" -> "Celtics"
-  if((g.league_name||'').includes('NBA') || (g.league_name||'').includes('NCAA') || (g.league_name||'').includes('WNBA')){
-    let parts = home.trim().split(' ');
-    home = parts[parts.length-1];
+  if((g.league_name||'').toLowerCase().includes('nba') || (g.league_name||'').includes('NCAA') || (g.league_name||'').includes('WNBA') || (g.league_name||'').toLowerCase().includes('basketball') || (g.league_name||'').includes('Euro') || (g.league_name||'').includes('Liga') || (g.league_name||'').includes('Serie') || (g.league_name||'').includes('BBL') || (g.league_name||'').includes('LNB') || (g.league_name||'').includes('NBB') || (g.league_name||'').includes('KBL')){
+    let parts = home.trim().split(' '); home = parts[parts.length-1];
   }
   return home;
 }
 function bookLink(g){
-  let home = shortSearchName(g);
-  let q = encodeURIComponent(home);
-  let full = (g.home_sporty||g.home) + ' vs ' + (g.away_sporty||g.away);
-  let isFuture = (g.days_from_now||0) > 2;
-  if(isFuture){
-    return '<div class="waitbox">⏳ <b>WAIT - Not on SportyBet yet</b><br>This game is on '+g.date+'. SportyBet only lists games 1-2 days before. Check again on '+g.date+' morning.<br><a class="copy" href="#" onclick="navigator.clipboard.writeText(\\''+full+'\\');alert(\\'Copied: '+full+'\\');return false;">📋 Copy name for later</a></div>';
-  }
-  return '<a class="book" href="https://www.sportybet.com/ng/search?query='+q+'" target="_blank">➡️ BOOK ON SPORTYBET - Search: '+home+'</a><div class="muted" style="font-size:13px;margin-top:6px">Make sure you are LOGGED IN to SportyBet first, or login will clear the search.<br>Look for: <b>'+full+'</b></div><a class="copy" href="#" onclick="navigator.clipboard.writeText(\\''+full+'\\');alert(\\'Copied: '+full+'\\');return false;">📋 Copy exact names</a>';
+  let home = shortSearchName(g); let q = encodeURIComponent(home); let full = (g.home_sporty||g.home) + ' vs ' + (g.away_sporty||g.away); let isFuture = (g.days_from_now||0) > 2;
+  if(isFuture){ return '<div class="waitbox">⏳ <b>WAIT - Not on SportyBet yet</b><br>This game is on '+g.date+'.<br><a class="copy" href="#" onclick="navigator.clipboard.writeText(\\''+full+'\\');alert(\\'Copied: '+full+'\\');return false;">📋 Copy name for later</a></div>'; }
+  return '<a class="book" href="https://www.sportybet.com/ng/search?query='+q+'" target="_blank">➡️ BOOK ON SPORTYBET - Search: '+home+'</a><div class="muted" style="font-size:13px;margin-top:6px">Look for: <b>'+full+'</b></div><a class="copy" href="#" onclick="navigator.clipboard.writeText(\\''+full+'\\');alert(\\'Copied: '+full+'\\');return false;">📋 Copy exact names</a>';
 }
 function ticketDef(key,title,list,total,isWeekend){return {key:key,title:title,list:list,total:total,isWeekend:isWeekend};}
 function renderTickets(t, showTick, prefix){let defs=[ticketDef('football_book_now','FOOTBALL BOOK NOW',t.football_book_now||[],t.football_book_now_total||0,false),ticketDef('football_weekend','FOOTBALL WEEKEND',t.football_weekend||[],t.football_weekend_total||0,true),ticketDef('basketball_book_now','BASKETBALL BOOK NOW',t.basketball_book_now||[],t.basketball_book_now_total||0,false),ticketDef('basketball_weekend','BASKETBALL WEEKEND',t.basketball_weekend||[],t.basketball_weekend_total||0,true)];let html='';defs.forEach(d=>{let h='<div class="card"><h3>'+prefix+d.title+' - '+d.list.length+' games | TOTAL ~'+d.total+'</h3>';if(showTick){let checked=d.isWeekend?'checked':'';h+='<label class="tick"><input type="checkbox" class="save-tick" data-key="'+d.key+'" '+checked+'> ✅ Tick to SAVE this ticket</label>';}if(!d.list.length)h+='<p>No strict picks.</p>';d.list.forEach((g,i)=>{h+='<div class="game"><b>'+(i+1)+'. '+(g.home_sporty||g.home)+' vs '+(g.away_sporty||g.away)+'</b><br><span class="muted">ESPN: '+g.home+' vs '+g.away+'</span><br>'+g.league_name+' | '+g.date+' '+g.time+' Lagos <span class="tag">'+g.bookable+'</span><br>'+g.market+' @ '+g.est_odd+'<br><span class="muted">'+g.reason+'</span><br>'+bookLink(g)+'</div>'});h+='</div>';html+=h;});html+='<div class="card muted">Generated: '+(t.generated_at_lagos||'')+' | '+(t.model||'')+'</div>';return html;}
-async function runPick(){document.getElementById('runBtn').disabled=true;document.getElementById('status').innerText='Running V15.1... please wait 2-4 mins (Last 3 needs more data)...';await fetch('/run',{method:'POST'});let ti=setInterval(async()=>{let s=await (await fetch('/status')).json();document.getElementById('status').innerText=s.running?'Still running...':'Done! '+(s.last_run||'');if(!s.running){clearInterval(ti);document.getElementById('runBtn').disabled=false;load();}},3000);}
+async function runPick(){document.getElementById('runBtn').disabled=true;document.getElementById('status').innerText='Running V16.2... please wait 4-6 mins (many more leagues now)...';await fetch('/run',{method:'POST'});let ti=setInterval(async()=>{let s=await (await fetch('/status')).json();document.getElementById('status').innerText=s.running?'Still running...':'Done! '+(s.last_run||'');if(!s.running){clearInterval(ti);document.getElementById('runBtn').disabled=false;load();}},3000);}
 async function load(){let d=await (await fetch('/api/tickets')).json();if(!d||!d.tickets){document.getElementById('out').innerHTML='<p>No picks yet.</p>';return;}CURRENT=d.tickets;document.getElementById('out').innerHTML=renderTickets(CURRENT,true,'');refreshSavedCount();}
 async function refreshSavedCount(){let s=await (await fetch('/saved')).json();SAVED_LIST=(s&&s.saved_list)?s.saved_list:[];document.getElementById('savedCount').innerText=SAVED_LIST.length;if(SAVED_LIST.length)document.getElementById('status').innerText='✅ You have '+SAVED_LIST.length+' saved ticket(s).';}
 function getTickedKeys(){let out=[];document.querySelectorAll('.save-tick:checked').forEach(c=>out.push(c.dataset.key));return out;}
@@ -325,11 +384,10 @@ async function saveTicked(){await doSave(getTickedKeys());}
 async function saveAllWeekend(){await doSave(['football_weekend','basketball_weekend']);}
 async function viewSaved(){await refreshSavedCount();if(!SAVED_LIST.length){alert('No saved tickets yet.');return;}let html='<div class="savedbox"><h2>📂 SAVED TICKETS - '+SAVED_LIST.length+'</h2><button class="bookall" onclick="bookAllSaved()">🎯 BOOK ALL SAVED NOW</button></div>';SAVED_LIST.forEach((t,idx)=>{html+='<div class="card"><h3>✅ SAVED: '+t.title+' - '+t.games.length+' games | TOTAL ~'+t.total+'</h3><p class="muted">Saved: '+t.saved_at+'</p><button class="del" onclick="deleteSaved('+idx+')">🗑 Delete</button>';t.games.forEach((g,i)=>{html+='<div class="game"><b>'+(i+1)+'. '+(g.home_sporty||g.home)+' vs '+(g.away_sporty||g.away)+'</b><br>'+g.league_name+' | '+g.date+' '+g.time+' <span class="tag">'+g.bookable+'</span><br>'+g.market+' @ '+g.est_odd+'<br><span class="muted">'+g.reason+'</span><br>'+bookLink(g)+'</div>'});html+='</div>';});document.getElementById('out').innerHTML=html;}
 async function deleteSaved(idx){if(!confirm('Delete this saved ticket?'))return;await fetch('/delete_saved/'+idx,{method:'POST'});viewSaved();}
-async function bookAllSaved(){await refreshSavedCount();if(!SAVED_LIST.length){alert('No saved tickets.');return;}let all=[];SAVED_LIST.forEach(t=>all.push(...t.games));let bookable = all.filter(g=>(g.days_from_now||0)<=2);if(!bookable.length){alert('All saved games are still WAIT - WEEKEND. SportyBet has not listed them yet. Check again 1-2 days before the game.');return;}if(!confirm('Open '+bookable.length+' BOOK NOW games on SportyBet? (Future games skipped - not listed yet)'))return;bookable.forEach((g,i)=>{setTimeout(()=>{let q=encodeURIComponent(shortSearchName(g));window.open('https://www.sportybet.com/ng/search?query='+q,'_blank');},i*1200);});}
+async function bookAllSaved(){await refreshSavedCount();if(!SAVED_LIST.length){alert('No saved tickets.');return;}let all=[];SAVED_LIST.forEach(t=>all.push(...t.games));let bookable = all.filter(g=>(g.days_from_now||0)<=2);if(!bookable.length){alert('All saved games are still WAIT - WEEKEND.');return;}if(!confirm('Open '+bookable.length+' BOOK NOW games?'))return;bookable.forEach((g,i)=>{setTimeout(()=>{let q=encodeURIComponent(shortSearchName(g));window.open('https://www.sportybet.com/ng/search?query='+q,'_blank');},i*1200);});}
 load();
 </script></body></html>
 """
-
 @app.route("/")
 def home(): return render_template_string(HTML)
 @app.route("/status")
