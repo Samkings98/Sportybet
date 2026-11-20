@@ -1,5 +1,5 @@
-# sportybet_bot.py - V20 - FULL CODE - LIVE + BACKTEST + TABS + LAST SESSION SAVED
-# V19 logic untouched + V20 UI: Tabs (Home/Backtest/Saved) + Back buttons + Auto-restore last session
+# sportybet_bot.py - V21 - FULL CODE
+# V20 + 5 fixes from backtest screenshots: Conf 0.40, Attack<1.0 skip, 0-in-3 skip, Over2.5 stricter, Cap 3 goals, H2H 120d, Basketball Defence fix
 import sys, json, time, requests, re, os, random, threading, math
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -13,6 +13,7 @@ FOOTBALL_MAX = 35
 BASKETBALL_MAX = 35
 DAYS_AHEAD = 7
 HISTORY_DAYS = 40
+H2H_DAYS = 120  # V21: H2H needs longer history
 NEED_GAMES = 4
 MIN_GAMES = 3
 CACHE_FILE = "last4_cache.json"
@@ -64,25 +65,17 @@ FOOTBALL_LEAGUES = [
     ("soccer", "conmebol.sudamericana", "CONMEBOL Sudamericana"),
 ]
 BASKETBALL_LEAGUES = [
-    ("basketball", "nba", "NBA"),
-    ("basketball", "wnba", "WNBA"),
+    ("basketball", "nba", "NBA"),("basketball", "wnba", "WNBA"),
     ("basketball", "mens-college-basketball", "NCAA, Regular Season"),
-    ("basketball", "euroleague", "Euroleague"),
-    ("basketball", "eurocup", "Eurocup"),
+    ("basketball", "euroleague", "Euroleague"),("basketball", "eurocup", "Eurocup"),
     ("basketball", "fiba-champions-league", "FIBA Champions League"),
-    ("basketball", "lnbp", "LNBP"),
-    ("basketball", "turkish-super-league", "Super Lig 26/27"),
+    ("basketball", "lnbp", "LNBP"),("basketball", "turkish-super-league", "Super Lig 26/27"),
     ("basketball", "israeli-super-league", "Basketball League"),
     ("basketball", "french-lnb-elite", "LNB Elite 26/27"),
-    ("basketball", "spanish-acb", "Liga ACB 26/27"),
-    ("basketball", "italian-serie-a", "Serie A 26/27"),
-    ("basketball", "german-bbl", "BBL 26/27"),
-    ("basketball", "vtb-united-league", "United League"),
-    ("basketball", "brazilian-nbb", "NBB"),
-    ("basketball", "argentinian-lnb", "LNB"),
-    ("basketball", "korean-kbl", "KBL"),
-    ("basketball", "australian-nbl", "NBL"),
-    ("basketball", "chinese-cba", "CBA"),
+    ("basketball", "spanish-acb", "Liga ACB 26/27"),("basketball", "italian-serie-a", "Serie A 26/27"),
+    ("basketball", "german-bbl", "BBL 26/27"),("basketball", "vtb-united-league", "United League"),
+    ("basketball", "brazilian-nbb", "NBB"),("basketball", "argentinian-lnb", "LNB"),
+    ("basketball", "korean-kbl", "KBL"),("basketball", "australian-nbl", "NBL"),("basketball", "chinese-cba", "CBA"),
 ]
 USER_AGENTS = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36","Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"]
 def espn_get(url):
@@ -112,9 +105,11 @@ def save_cache():
     try:
         with open(CACHE_FILE, "w", encoding="utf-8") as f: json.dump({"last4":LAST4_MAP,"h2h":H2H_MAP}, f)
     except: pass
+
 def build_last4(sport, league, days=HISTORY_DAYS):
     prefix = f"{sport}-{league}-"
-    if any(k.startswith(prefix) for k in LAST4_MAP): return
+    # V21: allow rebuilding for longer H2H history - if already has data and days==HISTORY_DAYS, skip
+    if days == HISTORY_DAYS and any(k.startswith(prefix) for k in LAST4_MAP): return
     today = lagos_now()
     for d in range(1, days+1):
         dt = today - timedelta(days=d); ds = dt.strftime("%Y%m%d")
@@ -132,17 +127,20 @@ def build_last4(sport, league, days=HISTORY_DAYS):
                 H2H_MAP.setdefault(hkey, [])
                 entry = [ds, s0, s1, id0, id1, str(t0["team"]["displayName"]), str(t1["team"]["displayName"])]
                 if entry not in H2H_MAP[hkey]: H2H_MAP[hkey].append(entry)
-                for mine, opp, my, op in [(t0, t1, s0, s1), (t1, t0, s1, s0)]:
-                    k = f"{sport}-{league}-{mine['team']['id']}"
-                    LAST4_MAP.setdefault(k, [])
-                    is_home = 1 if mine.get("homeAway")=="home" else 0
-                    e = [ds, my, op, str(opp["team"]["displayName"]), str(opp["team"]["id"]), is_home]
-                    if e not in LAST4_MAP[k]: LAST4_MAP[k].append(e)
+                # Only store Last4 from recent days, H2H from all days
+                if d <= HISTORY_DAYS:
+                    for mine, opp, my, op in [(t0, t1, s0, s1), (t1, t0, s1, s0)]:
+                        k = f"{sport}-{league}-{mine['team']['id']}"
+                        LAST4_MAP.setdefault(k, [])
+                        is_home = 1 if mine.get("homeAway")=="home" else 0
+                        e = [ds, my, op, str(opp["team"]["displayName"]), str(opp["team"]["id"]), is_home]
+                        if e not in LAST4_MAP[k]: LAST4_MAP[k].append(e)
             except: continue
     for k in list(LAST4_MAP):
         if k.startswith(prefix): LAST4_MAP[k] = sorted(LAST4_MAP[k], reverse=True)[:NEED_GAMES]
     for k in list(H2H_MAP):
-        H2H_MAP[k] = sorted(H2H_MAP[k], reverse=True)[:5]
+        H2H_MAP[k] = sorted(H2H_MAP[k], reverse=True)[:10]
+
 def weighted_avg(values, decay=0.90):
     if not values: return 0
     weights = [decay**i for i in range(len(values))]
@@ -152,14 +150,23 @@ def get_last4(sport, league, tid, next_game_date=None):
     lst = LAST4_MAP.get(f"{sport}-{league}-{tid}", [])
     if len(lst) < MIN_GAMES:
         log_skip("last4_lt3_skip"); return None
-    scored = [x[1] for x in lst]; conceded = [x[2] for x in lst]
+    scored_raw = [x[1] for x in lst]; conceded_raw = [x[2] for x in lst]
+    # V21 FIX: Cap football goals at 3 per game for Exp - one 6-0 no go fool bot
+    if sport == "soccer":
+        scored = [min(v, 3) for v in scored_raw]
+        conceded = [min(v, 3) for v in conceded_raw]
+    else:
+        scored = scored_raw; conceded = conceded_raw
     w_scored = weighted_avg(scored); w_conceded = weighted_avg(conceded); w_total = w_scored + w_conceded
     avg_s = sum(scored)/len(scored); avg_c = sum(conceded)/len(conceded)
-    wins = sum(1 for my, op in zip(scored, conceded) if my > op)
-    draws = sum(1 for my, op in zip(scored, conceded) if my == op)
-    losses = sum(1 for my, op in zip(scored, conceded) if my < op)
+    wins = sum(1 for my, op in zip(scored_raw, conceded_raw) if my > op)
+    draws = sum(1 for my, op in zip(scored_raw, conceded_raw) if my == op)
+    losses = sum(1 for my, op in zip(scored_raw, conceded_raw) if my < op)
     home_games = [x for x in lst if x[5]==1]; away_games = [x for x in lst if x[5]==0]
-    def _avg(arr, idx): return round(sum(x[idx] for x in arr)/len(arr),2) if arr else avg_s if idx==1 else avg_c
+    def _avg(arr, idx):
+        if not arr: return avg_s if idx==1 else avg_c
+        vals = [min(x[idx],3) if sport=="soccer" else x[idx] for x in arr]
+        return round(sum(vals)/len(vals),2)
     h_scored = _avg(home_games,1); h_conceded = _avg(home_games,2); a_scored = _avg(away_games,1); a_conceded = _avg(away_games,2)
     def _std(vals, mean):
         if len(vals)<2: return 0
@@ -183,10 +190,11 @@ def get_last4(sport, league, tid, next_game_date=None):
             except: pass
     else:
         fatigue = -0.4 if rest_to_next <= 2 else 0.0
+    # V21 FIX: Basketball Defence - old formula gave 0 for all NBA teams
     if sport == "soccer": attack = round(w_scored*2, 1); defence = round(max(0, 5-w_conceded), 1)
-    else: attack = round(w_scored/10, 1); defence = round(max(0, 10-w_conceded/10), 1)
+    else: attack = round(w_scored/10, 1); defence = round(max(0, (135 - w_conceded)/10), 1)
     sos_points = 0
-    for my, op in zip(scored, conceded):
+    for my, op in zip(scored_raw, conceded_raw):
         if sport == "soccer": opp_strength = 1.0 + (op - 1.2)*0.2
         else: opp_strength = 1.0 + (op - 100)*0.01
         opp_strength = max(0.5, min(1.5, opp_strength)); pts = 3 if my>op else 1 if my==op else 0; sos_points += pts * opp_strength
@@ -194,16 +202,20 @@ def get_last4(sport, league, tid, next_game_date=None):
     motivation = 0.5 if wins==0 else 0.0
     consistency = max(0.3, 1 - (std_total / (avg_s+avg_c+1) * 1.5)) if avg_s+avg_c>0 else 0.5
     confidence = round(consistency * min(1.0, len(lst)/NEED_GAMES),2)
-    total_goals_last4 = sum(scored) + sum(conceded)
-    over15_hits = sum(1 for my, op in zip(scored, conceded) if my+op >= 2)
-    over25_hits = sum(1 for my, op in zip(scored, conceded) if my+op >= 3)
-    return {"games": len(lst), "scored": scored, "conceded": conceded, "avg_scored": round(avg_s,2), "avg_conceded": round(avg_c,2),
+    total_goals_last4 = sum(scored_raw) + sum(conceded_raw)
+    over15_hits = sum(1 for my, op in zip(scored_raw, conceded_raw) if my+op >= 2)
+    over25_hits = sum(1 for my, op in zip(scored_raw, conceded_raw) if my+op >= 3)
+    # V21: Count blanks / scoring games for filters
+    zero_count = sum(1 for v in scored_raw if v==0)
+    scored_in_games = sum(1 for v in scored_raw if v>=1)
+    return {"games": len(lst), "scored": scored_raw, "conceded": conceded_raw, "avg_scored": round(avg_s,2), "avg_conceded": round(avg_c,2),
             "w_scored": round(w_scored,2), "w_conceded": round(w_conceded,2), "total": round(avg_s+avg_c,1), "w_total": round(w_total,1), "pace": pace,
             "wins": wins, "draws": draws, "losses": losses, "speed": speed, "attack": attack, "defence": defence, "sos_points": sos_points,
             "motivation": motivation, "opponents": [x[3] for x in lst], "home_scored": h_scored, "home_conceded": h_conceded,
             "away_scored": a_scored, "away_conceded": a_conceded, "std_total": round(std_total,2),
             "confidence": confidence, "rest_days": rest_days, "fatigue": fatigue,
-            "total_goals_last4": total_goals_last4, "over15_hits": over15_hits, "over25_hits": over25_hits}
+            "total_goals_last4": total_goals_last4, "over15_hits": over15_hits, "over25_hits": over25_hits,
+            "zero_count": zero_count, "scored_in_games": scored_in_games}
 
 def get_h2h(id_home, id_away):
     hkey = "-".join(sorted([str(id_home), str(id_away)])); lst = H2H_MAP.get(hkey, [])
@@ -242,9 +254,17 @@ def fetch_next_7_days(sport, league):
     return out
 
 def analyse_football(g, hs, aws):
+    # V21 FILTERS - from screenshots
+    # 1. Conf 0.40 minimum (was 0.30)
+    if hs["confidence"] < 0.40 or aws["confidence"] < 0.40:
+        log_skip("v21_conf_lt040_skip"); return None, None
+    # 2. Attack < 1.0 skip - JEF 0.0, Necaxa 0.5, Shimizu 0.8, Como 0.9, Excelsior 0.4
+    if hs["attack"] < 1.0 or aws["attack"] < 1.0:
+        log_skip("v21_attack_lt10_skip"); return None, None
+    # 3. Scored 0 in 3+ of Last4 skip
+    if hs["zero_count"] >= 3 or aws["zero_count"] >= 3:
+        log_skip("v21_zero_3plus_skip"); return None, None
     h2h = get_h2h(g["home_id"], g["away_id"])
-    h_attack = hs["home_scored"] if hs["home_scored"] else hs["w_scored"]
-    a_attack = aws["away_scored"] if aws["away_scored"] else aws["w_scored"]
     combined = round((hs["w_total"]+aws["w_total"])/2,2)
     if h2h["games"]>=2 and h2h["avg_total"]>=3:
         combined = round(combined + 0.3,2)
@@ -255,14 +275,18 @@ def analyse_football(g, hs, aws):
     if both_defensive:
         log_skip("football_both_defensive_skip"); return None, None
     main_pick = None; high_pick = None
-    if conf >= 0.30 and combined >= 2.0 and hs["over15_hits"]>=2 and aws["over15_hits"]>=2:
+    if conf >= 0.40 and combined >= 2.0 and hs["over15_hits"]>=2 and aws["over15_hits"]>=2:
         if combined >= 3.2: odd = 1.10
         elif combined >= 2.6: odd = 1.15
         elif combined >= 2.3: odd = 1.20
         else: odd = 1.25
         main_pick = {**base, "market": "Over 1.5", "est_odd": odd, "reason": f"OVER 1.5 | Exp {combined} | H2H Avg {h2h['avg_total']} | {detail}", "score": combined*conf*odd}
+    # V21 Over 2.5 HIGH stricter: both must score in 3+ of Last4 AND Attack >=1.5
     hs_total_scored = sum(hs["scored"]); aws_total_scored = sum(aws["scored"])
-    if conf >= 0.30 and combined >= 2.8 and hs_total_scored>=6 and aws_total_scored>=6 and hs["over25_hits"]>=2 and aws["over25_hits"]>=2:
+    over25_eligible = (hs["scored_in_games"]>=3 and aws["scored_in_games"]>=3 and hs["attack"]>=1.5 and aws["attack"]>=1.5)
+    if not over25_eligible:
+        log_skip("v21_over25_not_eligible")
+    elif conf >= 0.40 and combined >= 2.8 and hs_total_scored>=6 and aws_total_scored>=6 and hs["over25_hits"]>=2 and aws["over25_hits"]>=2:
         high_pick = {**base, "market": "Over 2.5 - HIGH", "est_odd": 1.75, "reason": f"OVER 2.5 HIGH | Exp {combined} | H scored {hs_total_scored} in Last4, A scored {aws_total_scored} in Last4 | {detail}", "score": combined*conf*1.75}
     if not main_pick and not high_pick:
         log_skip("football_no_over15")
@@ -270,8 +294,6 @@ def analyse_football(g, hs, aws):
 
 def analyse_basketball(g, hs, aws):
     h2h = get_h2h(g["home_id"], g["away_id"])
-    h_diff = hs["home_scored"]-hs["home_conceded"] if hs["home_scored"] else hs["w_scored"]-hs["w_conceded"]
-    a_diff = aws["away_scored"]-aws["away_conceded"] if aws["away_scored"] else aws["w_scored"]-aws["w_conceded"]
     expected = round((hs["w_total"]+aws["w_total"])/2,1)
     pace_total = round((hs["pace"]+aws["pace"])/2,1)
     expected = round((expected+pace_total)/2,1)
@@ -282,6 +304,9 @@ def analyse_basketball(g, hs, aws):
     detail = f"H2H: {h2h['text']} | SOS H {hs['sos_points']} vs A {aws['sos_points']} | Attack H {hs['attack']} A {aws['attack']} | Defence H {hs['defence']} A {aws['defence']} | Conf {conf} | Pace {pace_total} | Rest H{hs['rest_days']}d A{aws['rest_days']}d"
     is_ncaa = "NCAA" in g.get("league_name","") or "college" in g.get("league","")
     def_threshold = 65 if is_ncaa else 100
+    # V21: use fixed Defence now - if both teams defend well (Defence high), skip
+    if hs["defence"] >= 4.5 and aws["defence"] >= 4.5:
+        log_skip("basket_both_defensive_skip"); return None
     if hs["w_conceded"] < def_threshold and aws["w_conceded"] < def_threshold:
         log_skip("basket_both_defensive_skip"); return None
     gap = 8 if is_ncaa else 12
@@ -298,9 +323,9 @@ def build_ticket(candidates, max_games):
         picked.append(c); total*=c["est_odd"]
         if total>=TARGET_TOTAL_ODD and len(picked)>=10: break
     return picked, round(total,1)
-def build_all_last4(leagues):
+def build_all_last4(leagues, days=HISTORY_DAYS):
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
-        futs={ex.submit(build_last4, s, l, HISTORY_DAYS): (s,l,n) for s,l,n in leagues}
+        futs={ex.submit(build_last4, s, l, days): (s,l,n) for s,l,n in leagues}
         for f in concurrent.futures.as_completed(futs):
             try: f.result()
             except: pass
@@ -357,12 +382,12 @@ def run_picker():
     tickets={"football_book_now": f_now_ticket, "football_book_now_total": f_now_total, "football_weekend": f_weekend_ticket, "football_weekend_total": f_weekend_total,
              "football_high_book_now": f_high_now_ticket, "football_high_book_now_total": f_high_now_total, "football_high_weekend": f_high_weekend_ticket, "football_high_weekend_total": f_high_weekend_total,
              "basketball_book_now": b_now_ticket, "basketball_book_now_total": b_now_total, "basketball_weekend": b_weekend_ticket, "basketball_weekend_total": b_weekend_total,
-             "generated_at_lagos": now.isoformat(), "skips": FAIL["skip"], "model": "V20 Last4-40days + Over1.5 Main + OverMin Basket + Over2.5 High + H2H/SOS/Strength/Defence + Backtest + Saved Session"}
+             "generated_at_lagos": now.isoformat(), "skips": FAIL["skip"], "model": "V21 Conf0.40 + Attack>=1.0 + Zero3skip + Over2.5 stricter + Cap3 + H2H120d + Basket Defence fix"}
     with open("tickets.json","w",encoding="utf-8") as f: json.dump(tickets,f,indent=2,ensure_ascii=False)
     with STATE_LOCK: STATE["tickets"] = tickets
     return tickets
 
-# ================= BACKTEST - V20 - SEPARATE FROM LIVE =================
+# ================= BACKTEST - V21 =================
 def get_last4_asof(sport, league, tid, game_date_str):
     all_lst = LAST4_MAP.get(f"{sport}-{league}-{tid}", [])
     lst = [x for x in all_lst if x[0] < game_date_str]
@@ -385,7 +410,8 @@ def run_backtest():
     old_need = NEED_GAMES
     LAST4_MAP = {}; H2H_MAP = {}
     NEED_GAMES = 50
-    build_all_last4(FOOTBALL_LEAGUES + BASKETBALL_LEAGUES)
+    # V21: build 120 days for H2H, Last4 still limited to 50 games from recent 40 days via build logic
+    build_all_last4(FOOTBALL_LEAGUES + BASKETBALL_LEAGUES, days=H2H_DAYS)
     NEED_GAMES = old_need
     save_cache()
     results = []
@@ -495,9 +521,9 @@ def _run_backtest_in_background():
 
 HTML = """
 <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SportyBot V20</title>
+<title>SportyBot V21</title>
 <style>body{font-family:Arial,sans-serif;background:#0f1115;color:#fff;margin:0;padding:16px}h1{font-size:22px}button{background:#00c853;color:#fff;border:0;padding:14px 20px;font-size:18px;border-radius:10px;width:100%;cursor:pointer;margin-top:10px}button:disabled{opacity:.5}.backtest{background:#673ab7}.save{background:#ff9800;color:#000}.saveall{background:#ff5722}.view{background:#2196f3}.bookall{background:#7c4dff}.backbtn{background:#333}.tabbar{display:flex;gap:8px;margin-top:12px}.tabbar button{padding:10px;font-size:15px}.tabbar button.active{background:#fff;color:#000}.card{background:#1c1f26;padding:14px;border-radius:12px;margin-top:14px}.game{border-bottom:1px solid #333;padding:8px 0}.tag{background:#ff9800;color:#000;padding:2px 8px;border-radius:20px;font-size:12px;font-weight:bold}.muted{color:#aaa}.book{display:block;background:#00c853;color:#fff;text-align:center;padding:12px;border-radius:8px;margin-top:8px;text-decoration:none;font-weight:bold}.copy{display:block;background:#333;color:#fff;text-align:center;padding:8px;border-radius:8px;margin-top:6px;text-decoration:none}.tick{font-size:18px;background:#2a2e38;padding:10px;border-radius:8px;display:block;margin-bottom:8px}.tick input{width:22px;height:22px;transform:scale(1.4);margin-right:10px}.savedbox{border:2px solid #ff9800;padding:10px;border-radius:10px}.del{background:#e53935;padding:6px 12px;width:auto;font-size:14px}.loginbtn{display:block;background:#fff;color:#000;text-align:center;padding:14px;border-radius:10px;margin-top:10px;text-decoration:none;font-weight:bold;font-size:18px}.waitbox{background:#333;padding:10px;border-radius:8px;margin-top:8px}.btwin{border-left:5px solid #00c853}.btloss{border-left:5px solid #e53935}</style></head>
-<body><h1>⚽ SportyBot V20 - Last 4 + Backtest + Saved Session</h1><p class="muted">Last session auto-loads. You only click RUN when you want NEW picks.</p>
+<body><h1>⚽ SportyBot V21 - Last 4 + Backtest + Saved Session</h1><p class="muted">V21: Conf 0.40 + Attack>=1.0 + No 0-in-3 + Over 2.5 stricter + Cap 3 goals. Last session auto-loads.</p>
 <a class="loginbtn" href="https://www.sportybet.com/ng/" target="_blank">🔐 LOGIN TO SPORTYBET FIRST</a>
 <div class="tabbar">
   <button id="tabHome" class="active" onclick="showTab('home')">🏠 HOME</button>
@@ -537,15 +563,15 @@ function showTab(name){
 }
 function saveLocal(){
   try{
-    if(CURRENT) localStorage.setItem('v20_tickets', JSON.stringify(CURRENT));
-    if(SAVED_LIST.length) localStorage.setItem('v20_saved', JSON.stringify(SAVED_LIST));
+    if(CURRENT) localStorage.setItem('v21_tickets', JSON.stringify(CURRENT));
+    if(SAVED_LIST.length) localStorage.setItem('v21_saved', JSON.stringify(SAVED_LIST));
   }catch(e){}
 }
 function loadLocal(){
   try{
-    let t = localStorage.getItem('v20_tickets');
+    let t = localStorage.getItem('v21_tickets') || localStorage.getItem('v20_tickets');
     if(t && !CURRENT){ CURRENT = JSON.parse(t); document.getElementById('out').innerHTML = renderTickets(CURRENT,true,''); }
-    let s = localStorage.getItem('v20_saved');
+    let s = localStorage.getItem('v21_saved') || localStorage.getItem('v20_saved');
     if(s){ SAVED_LIST = JSON.parse(s); document.getElementById('savedCount').innerText = SAVED_LIST.length; }
   }catch(e){}
 }
@@ -562,20 +588,20 @@ function bookLink(g){
   return '<a class="book" href="https://www.sportybet.com/ng/search?query='+q+'" target="_blank">➡️ BOOK ON SPORTYBET - Search: '+home+'</a><div class="muted" style="font-size:13px;margin-top:6px">Look for: <b>'+full+'</b> then pick <b>'+g.market+'</b></div><a class="copy" href="#" onclick="navigator.clipboard.writeText(\\''+full+'\\');alert(\\'Copied: '+full+'\\');return false;">📋 Copy exact names</a>';
 }
 function ticketDef(key,title,list,total,isWeekend){return {key:key,title:title,list:list,total:total,isWeekend:isWeekend};}
-function renderTickets(t, showTick, prefix){let defs=[ticketDef('football_book_now','FOOTBALL OVER 1.5 - BOOK NOW',t.football_book_now||[],t.football_book_now_total||0,false),ticketDef('football_weekend','FOOTBALL OVER 1.5 - WEEKEND',t.football_weekend||[],t.football_weekend_total||0,true),ticketDef('football_high_book_now','FOOTBALL OVER 2.5 HIGH - BOOK NOW',t.football_high_book_now||[],t.football_high_book_now_total||0,false),ticketDef('football_high_weekend','FOOTBALL OVER 2.5 HIGH - WEEKEND',t.football_high_weekend||[],t.football_high_weekend_total||0,true),ticketDef('basketball_book_now','BASKETBALL OVER MIN - BOOK NOW',t.basketball_book_now||[],t.basketball_book_now_total||0,false),ticketDef('basketball_weekend','BASKETBALL OVER MIN - WEEKEND',t.basketball_weekend||[],t.basketball_weekend_total||0,true)];let html='';defs.forEach(d=>{let h='<div class="card"><h3>'+prefix+d.title+' - '+d.list.length+' games | TOTAL ~'+d.total+'</h3>';if(showTick){let checked=d.isWeekend?'checked':'';h+='<label class="tick"><input type="checkbox" class="save-tick" data-key="'+d.key+'" '+checked+'> ✅ Tick to SAVE this ticket</label>';}if(!d.list.length)h+='<p>No strict picks.</p>';d.list.forEach((g,i)=>{h+='<div class="game"><b>'+(i+1)+'. '+(g.home_sporty||g.home)+' vs '+(g.away_sporty||g.away)+'</b><br><span class="muted">ESPN: '+g.home+' vs '+g.away+'</span><br>'+g.league_name+' | '+g.date+' '+g.time+' Lagos <span class="tag">'+g.bookable+'</span><br>'+g.market+' @ '+g.est_odd+'<br><span class="muted">'+g.reason+'</span><br>'+bookLink(g)+'</div>'});h+='</div>';html+=h;});html+='<div class="card muted">Generated: '+(t.generated_at_lagos||'')+' | '+(t.model||'')+'</div>';return html;}
-async function runPick(){document.getElementById('runBtn').disabled=true;document.getElementById('status').innerText='Running V20 Live...';await fetch('/run',{method:'POST'});let ti=setInterval(async()=>{let s=await (await fetch('/status')).json();document.getElementById('status').innerText=s.running?'Still running...':'Done! '+(s.last_run||'');if(!s.running){clearInterval(ti);document.getElementById('runBtn').disabled=false;load();}},3000);}
+function renderTickets(t, showTick, prefix){let defs=[ticketDef('football_book_now','FOOTBALL OVER 1.5 - BOOK NOW',t.football_book_now||[],t.football_book_now_total||0,false),ticketDef('football_weekend','FOOTBALL OVER 1.5 - WEEKEND',t.football_weekend||[],t.football_weekend_total||0,true),ticketDef('football_high_book_now','FOOTBALL OVER 2.5 HIGH - BOOK NOW',t.football_high_book_now||[],t.football_high_book_now_total||0,false),ticketDef('football_high_weekend','FOOTBALL OVER 2.5 HIGH - WEEKEND',t.football_high_weekend||[],t.football_high_weekend_total||0,true),ticketDef('basketball_book_now','BASKETBALL OVER MIN - BOOK NOW',t.basketball_book_now||[],t.basketball_book_now_total||0,false),ticketDef('basketball_weekend','BASKETBALL OVER MIN - WEEKEND',t.basketball_weekend||[],t.basketball_weekend_total||0,true)];let html='';defs.forEach(d=>{let h='<div class="card"><h3>'+prefix+d.title+' - '+d.list.length+' games | TOTAL ~'+d.total+'</h3>';if(showTick){let checked=d.isWeekend?'checked':'';h+='<label class="tick"><input type="checkbox" class="save-tick" data-key="'+d.key+'" '+checked+'> ✅ Tick to SAVE this ticket</label>';}if(!d.list.length)h+='<p>No strict picks - V21 filter removed weak games.</p>';d.list.forEach((g,i)=>{h+='<div class="game"><b>'+(i+1)+'. '+(g.home_sporty||g.home)+' vs '+(g.away_sporty||g.away)+'</b><br><span class="muted">ESPN: '+g.home+' vs '+g.away+'</span><br>'+g.league_name+' | '+g.date+' '+g.time+' Lagos <span class="tag">'+g.bookable+'</span><br>'+g.market+' @ '+g.est_odd+'<br><span class="muted">'+g.reason+'</span><br>'+bookLink(g)+'</div>'});h+='</div>';html+=h;});html+='<div class="card muted">Generated: '+(t.generated_at_lagos||'')+' | '+(t.model||'')+'</div>';return html;}
+async function runPick(){document.getElementById('runBtn').disabled=true;document.getElementById('status').innerText='Running V21 Live...';await fetch('/run',{method:'POST'});let ti=setInterval(async()=>{let s=await (await fetch('/status')).json();document.getElementById('status').innerText=s.running?'Still running...':'Done! '+(s.last_run||'');if(!s.running){clearInterval(ti);document.getElementById('runBtn').disabled=false;load();}},3000);}
 function renderBacktest(bt){
   let sm=bt.summary;
-  let html='<div class="card" style="border:2px solid #673ab7"><h2>📊 BACKTEST RESULT - LAST 40 DAYS</h2><p class="muted">Generated: '+bt.generated_at_lagos+' | Total picks: '+bt.total_games_checked+'</p>';
+  let html='<div class="card" style="border:2px solid #673ab7"><h2>📊 BACKTEST RESULT - LAST 40 DAYS - V21</h2><p class="muted">Generated: '+bt.generated_at_lagos+' | Total picks: '+bt.total_games_checked+'</p>';
   for(let k in sm){ html+='<p style="font-size:18px"><b>'+k+':</b> '+sm[k].won+' won / '+sm[k].picked+' = <b>'+sm[k].hit_rate+'%</b></p>'; }
   html+='</div>';
   bt.results.forEach(r=>{ html+='<div class="card '+(r.won?'btwin':'btloss')+'"><b>'+r.home+' vs '+r.away+'</b> - '+r.market+'<br>'+r.league_name+' | '+r.date+' | Score: '+r.actual_score+' | Total: '+r.total+' | '+(r.won?'✅ WON':'❌ LOST')+'<br><span class="muted">'+r.reason+'</span></div>'; });
   document.getElementById('backtestOut').innerHTML=html;
-  try{ localStorage.setItem('v20_backtest', JSON.stringify(bt)); }catch(e){}
+  try{ localStorage.setItem('v21_backtest', JSON.stringify(bt)); }catch(e){}
 }
 async function loadBacktestFromCache(){
   try{
-    let cached = localStorage.getItem('v20_backtest');
+    let cached = localStorage.getItem('v21_backtest');
     if(cached){ renderBacktest(JSON.parse(cached)); return; }
     let d=await (await fetch('/api/backtest')).json();
     if(d.backtest) renderBacktest(d.backtest);
@@ -584,8 +610,8 @@ async function loadBacktestFromCache(){
 async function runBacktest(){
   document.getElementById('btBtn').disabled=true;
   showTab('backtest');
-  document.getElementById('status').innerText='Running Backtest...';
-  document.getElementById('backtestOut').innerHTML='<div class="card">⏳ Backtest running... 2-4 mins...</div>';
+  document.getElementById('status').innerText='Running Backtest V21...';
+  document.getElementById('backtestOut').innerHTML='<div class="card">⏳ Backtest V21 running... 3-5 mins (120 days H2H)...</div>';
   await fetch('/backtest',{method:'POST'});
   let ti=setInterval(async()=>{
     let s=await (await fetch('/status')).json();
